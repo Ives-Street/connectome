@@ -51,8 +51,8 @@ def prepare_osm(polygon, scenario="existing_conditions"):
     #add LTS tags for biking
     #TODO -- move to pre-scenario-run?
     print('adding bike LTS tags')
-    prep_bike_osm.add_lts_tags(scenario+"/study_area.pbf",
-                               scenario+"/study_area_LTS.pbf")
+    prep_bike_osm.add_lts_tags(scenario + "/study_area.pbf",
+                               scenario +"/study_area_LTS.pbf")
     #make a JOSM-editable .osm file for users to make new scenarios
     command = f"osmconvert {scenario}/study_area_LTS.pbf -o={scenario}/study_area_LTS_editable.osm"
     subprocess.check_call(command.split(' '))
