@@ -224,7 +224,7 @@ def create_subdemo_statistics(tracts: gpd.GeoDataFrame,
 GHS_FILENAME = 'GHS_POP_E2020_GLOBE_R2023A_54009_1000_V1_0.tif'
 
 
-#TODO divide into two functions?
+#TODO divide into two functions? Create grid, and then populate based on census data?
 def divide_tracts_to_grid(tracts,
                           sub_demos,
                           grid_size=1000,
