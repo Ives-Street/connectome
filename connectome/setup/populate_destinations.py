@@ -26,7 +26,7 @@ def populate_destinations_overture_places(geographies: gpd.GeoDataFrame) -> gpd.
 
     return geographies
 
-def populate_destinations_LODES_tracts(geographies: gpd.GeoDataFrame,
+def populate_destinations_LODES_jobs(geographies: gpd.GeoDataFrame,
                                        state: str, #todo enable list-of-states as in populate_people_usa
                                        already_tracts = False) -> gpd.GeoDataFrame:
     if already_tracts: #our input analysis areas are already census tracts
@@ -50,13 +50,14 @@ def populate_destinations_LODES_tracts(geographies: gpd.GeoDataFrame,
         geographies_ll["C000_sum"] = geographies_ll.index.map(sums).fillna(0)
         return geographies_ll.to_crs(geographies.crs)
 
+
 def populate_all_dests_USA(geographies: gpd.GeoDataFrame,
                            state: str,
                            already_tracts = False,
                            save_to: str = "",  #'existing_conditions/geographies_with_dests.csv'
                             ) -> gpd.GeoDataFrame:
     with_overture = populate_destinations_overture_places(geographies)
-    with_lodes = populate_destinations_LODES_tracts(with_overture, state, already_tracts)
+    with_lodes = populate_destinations_LODES_jobs(with_overture, state, already_tracts)
     if not save_to == False:
         with_lodes.to_file(save_to)
 

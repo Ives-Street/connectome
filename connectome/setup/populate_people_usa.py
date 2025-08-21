@@ -42,6 +42,7 @@ def get_acs_data_for_tracts(tracts: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
                                          )[0]
         for var_name in acs_variable_names:
             tracts.loc[idx, var_name] = vals[var_name]
+    tracts['census_total_pop'] = tracts['B01003_001E']
     return tracts
 
 
