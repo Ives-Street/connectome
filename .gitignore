@@ -7,7 +7,7 @@ pop_points.csv
 *.osm
 network.dat
 *.mapdb*
-
+*.gpkg
 
 
 
@@ -142,3 +142,6 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# api tokens
+mobility_db_refresh_token.txt

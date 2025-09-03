@@ -67,7 +67,7 @@ def usa_tracts_from_address(
     if not union_tracts_list:
         raise ValueError("No tracts were successfully fetched from any state")
     
-    union_tracts = pd.concat(union_tracts_list, ignore_index=True)
+    union_tracts = pd.concat(union_tracts_list, ignore_index=True) # Do you want an actual unioned shape here? Or just concated?
     logger.info(f"Combined {len(union_tracts)} tracts from {len(states)} states")
     
     # Remove water bodies
@@ -75,6 +75,7 @@ def usa_tracts_from_address(
     union_tracts = pygris.utils.erase_water(union_tracts, area_threshold=water_threshold)
     final_count = len(union_tracts)
     logger.info(f"Removed water bodies: {original_count - final_count} tracts removed")
+    logger.info(f"Final tract count: {final_count}")
     
     # Save to file if specified
     if save_to:

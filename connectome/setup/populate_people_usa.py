@@ -32,7 +32,7 @@ acs_variables = {
 
 
 def get_acs_data_for_tracts(tracts: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    c = Census("b55e824143791db1b0dc9dc85688cbefd0b3a04f")
+    c = Census("b55e824143791db1b0dc9dc85688cbefd0b3a04f") #TODO shouldn't be hardcoded, can be set up in python env 
     acs_variable_names = list(acs_variables.keys())
     for idx in tqdm(list(tracts.index)):
         vals = c.acs5.state_county_tract(acs_variable_names,
