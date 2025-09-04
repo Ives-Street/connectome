@@ -4,7 +4,6 @@ import geopandas as gpd
 import PyQt6
 from pathlib import Path
 
-
 #assume we're running this from connectome/connectome/
 #in case we're just in connectome/ :
 if not os.path.exists('setup'):
@@ -18,6 +17,7 @@ from setup.populate_destinations import populate_all_dests_USA
 from setup.physical_conditions import (
     download_osm, make_osm_editable, get_GTFS_from_mobility_database
 )
+from representation import apply_experience_defintions
 
 
 if __name__=='__main__':
@@ -25,6 +25,7 @@ if __name__=='__main__':
     os.makedirs(run_name,exist_ok=True)
     os.makedirs("existing_conditions", exist_ok=True)
     os.makedirs("existing_conditions/input_data", exist_ok=True)
+    scenario_dir = f'{run_name}/existing_conditions'
     input_dir = f'{run_name}/existing_conditions/input_data'
 
     #get tracts
@@ -94,3 +95,23 @@ if __name__=='__main__':
                                         f"{input_dir}/GTFS/",
                                         0.2)
 
+    if not os.path.exists(f"{scenario_dir}/subdemo_categories_with_routeenvs.csv"):
+        print("defining experiences")
+        subdemo_categories_with_routeenvs = apply_experience_defintions(f"{input_dir}/osm_study_area.pbf",
+                                    f"{input_dir}/GTFS/",
+                                   subdemo_categories,
+                                   f"{scenario_dir}/routing/",
+                                   f"{scenario_dir}/subdemo_categories_with_routeenvs.csv"
+                                   )
+    else:
+        subdemo_categories_with_routeenvs = pd.read_csv(f"{scenario_dir}/subdemo_categories_with_routeenvs.csv")
+#
+# routeenv_dir = "test_run_burlington/existing_conditions/routing"
+# routeenv = 'universal_re'
+# from r5py import TransportNetwork
+# gtfs_files = os.listdir(f"{routeenv_dir}/{routeenv}/gtfs_files")
+# gtfs_fullpaths = [f"{routeenv_dir}/{routeenv}/gtfs_files/{filename}" for filename in gtfs_files]
+# network = TransportNetwork(
+#     osm_pbf=f"{routeenv_dir}/{routeenv}/osm_file.pbf",
+#     gtfs=gtfs_fullpaths,
+# )
