@@ -15,9 +15,18 @@ VISIT_FREQ = {
 }
 
 # read in overture places categories and assign overture json to appropriate category
+# ^^ probably not necessary since json includes categories
 # How many categories we thinking?
 
-
+#TODO have this funciton take the dest_type
 def value(subdemo, dest_type, minute_equivalents, time_of_day) -> float:
     base_val = np.exp(-0.05 * minute_equivalents)
+    # subdemo? A little more complicated
+
+    # weight by visit frequency/possibly weighted by size? - include this as an input?
+
+
+    # weight by TOD (will come later)
+
+
     return val
