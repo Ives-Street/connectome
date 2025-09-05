@@ -19,6 +19,9 @@ from setup.physical_conditions import (
     download_osm, make_osm_editable, get_GTFS_from_mobility_database
 )
 from setup.define_valuations import value
+=======
+from representation import apply_experience_defintions
+>>>>>>> origin/main
 
 
 if __name__=='__main__':
@@ -127,3 +130,23 @@ if __name__=='__main__':
         study_area_tracts_with_dests = gpd.read_file(f"{input_dir}/destination_statistics.gpkg")
         print("example valuation:", value("low_income", "overture_places", 15, "morning"))
 
+    if not os.path.exists(f"{scenario_dir}/subdemo_categories_with_routeenvs.csv"):
+        print("defining experiences")
+        subdemo_categories_with_routeenvs = apply_experience_defintions(f"{input_dir}/osm_study_area.pbf",
+                                    f"{input_dir}/GTFS/",
+                                   subdemo_categories,
+                                   f"{scenario_dir}/routing/",
+                                   f"{scenario_dir}/subdemo_categories_with_routeenvs.csv"
+                                   )
+    else:
+        subdemo_categories_with_routeenvs = pd.read_csv(f"{scenario_dir}/subdemo_categories_with_routeenvs.csv")
+#
+# routeenv_dir = "test_run_burlington/existing_conditions/routing"
+# routeenv = 'universal_re'
+# from r5py import TransportNetwork
+# gtfs_files = os.listdir(f"{routeenv_dir}/{routeenv}/gtfs_files")
+# gtfs_fullpaths = [f"{routeenv_dir}/{routeenv}/gtfs_files/{filename}" for filename in gtfs_files]
+# network = TransportNetwork(
+#     osm_pbf=f"{routeenv_dir}/{routeenv}/osm_file.pbf",
+#     gtfs=gtfs_fullpaths,
+# )

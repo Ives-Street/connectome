@@ -15,6 +15,9 @@ def populate_destinations_overture_places(geographies: gpd.GeoDataFrame) -> gpd.
     '''
     # Get the bounding box of the geographies
     bbox = geographies.total_bounds  # (minx, miny, maxx, maxy)
+=======
+    bbox = list(geographies.total_bounds)  # [minx, miny, maxx, maxy]
+>>>>>>> origin/main
     # Download Places from Overture Maps within the bounding box
     places_gdf = core.geodataframe("place", bbox)
     places_gdf.crs=4326
