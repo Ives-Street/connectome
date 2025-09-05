@@ -18,11 +18,11 @@ import string
 
 os.environ['MOBILITY_API_REFRESH_TOKEN'] = open("mobility_db_refresh_token.txt").read().rstrip("\n")
 
-def download_osm(geometry, #unbuffered
-                save_to_unclipped,
-                save_to_clipped,
-                save_to_clipped_editable = "",
-                buffer_dist = 2000, #meters
+def download_osm(geometry: gpd.GeoDataFrame, #unbuffered
+                save_to_unclipped: str,
+                save_to_clipped: str,
+                save_to_clipped_editable:str = "",
+                buffer_dist: float = 2000, #meters
                 ):
     print('preparing OSM')
     polygon_unbuffered = geometry.union_all()
@@ -119,13 +119,22 @@ def make_osm_editable(pbf_file, osm_file):
     subprocess.check_call(command.split(' '))
     
 def get_GTFS_from_mobility_database(
-        geometry, #unbuffered
-        save_to_dir,
-        min_overlap = 0.001,):
+        geometry: gpd.GeoDataFrame, #unbuffered
+        save_to_dir: str,
+        min_overlap: float = 0.001,
+        include_no_bbox: bool = False,
+        ):
+    """
+    Downloads GTFS feeds from the Mobility Database API and saves them to the specified directory.
+    Relies on loading an API refresh key from mobility_db_refresh_token.txt
+    Args:
+        geometry:
+        save_to_dir:
+        min_overlap: Minimum overlap between feed bbox and geometry to justify inclusion. Default 0.1%.
+    """
     geometry_ll = geometry.to_crs(4326)
     study_poly = geometry_ll.union_all()  # merge into single polygon
     minx, miny, maxx, maxy = study_poly.bounds
-
 
     api = MobilityAPI()
     access_token = api.get_access_token()
@@ -180,12 +189,16 @@ def get_GTFS_from_mobility_database(
             if overlap_ratio >= min_overlap:
                 selected_feeds.append(feed)
 
+
     if len(selected_feeds) > 0:
         print(f"{len(selected_feeds)} feeds overlap ≥{min_overlap}")
     else:
         print("no overlapping GTFS files found!")
     if len(feeds_without_bbox) > 0:
         print(f"bbox not found for {[feed['provider'] for feed in feeds_without_bbox]} -- you might want to check if they're relevant")
+        if include_no_bbox:
+            print ("including those feeds without bbox")
+            selected_feeds += feeds_without_bbox
 
     # Download selected feeds
     os.makedirs(save_to_dir, exist_ok=True)
@@ -198,7 +211,7 @@ def get_GTFS_from_mobility_database(
             print('not download_url')
             continue
 
-        outfile = f"{save_to_dir}{feed_id}.zip"
+        outfile = f"{save_to_dir}{feed_id}_{feed['provider']}.zip"
         if os.path.exists(outfile):
             print(f"Already downloaded {feed_id}")
             continue
@@ -211,39 +224,3 @@ def get_GTFS_from_mobility_database(
                 f.write(chunk)
 
     print("Download complete")
-
-
-
-    # OLD CODE:
-    # files = os.listdir(save_to_dir)
-    # if not 'sources.csv' in files:
-    #     url = 'https://bit.ly/catalogs-csv'
-    #     r = requests.get(url, allow_redirects=True)  # to get content after redirection
-    #     with open(f'{scenario}/sources.csv', 'wb') as f:
-    #         f.write(r.content)
-    # sources = gpd.read_file(f'{scenario}/sources.csv')
-    # filenames = []
-    # for idx in tqdm(list(sources.index)):
-    #     if not sources.loc[idx,'location.bounding_box.minimum_longitude'] == '':
-    #         sources.loc[idx,'geometry'] = shapely.geometry.box(
-    #             float(sources.loc[idx,'location.bounding_box.minimum_longitude']),
-    #             float(sources.loc[idx,'location.bounding_box.minimum_latitude']),
-    #             float(sources.loc[idx,'location.bounding_box.maximum_longitude']),
-    #             float(sources.loc[idx,'location.bounding_box.maximum_latitude']),
-    #             )
-    #         if sources.loc[idx,'geometry'].intersects(polygon):
-    #             overlap = sources.loc[idx,'geometry'].intersection(polygon)
-    #             if overlap.area * 1000 > sources.loc[idx,'geometry'].area:
-    #                 url = sources.loc[idx,'urls.latest']
-    #                 name = sources.loc[idx,'provider']
-    #                 if sources.loc[idx,'name'] != '':
-    #                     name = name+'_'+ sources.loc[idx,'name']
-    #                 name = name.translate(str.maketrans('', '', string.punctuation))
-    #                 name = name.replace(' ','_')
-    #                 if name != '' and url != '':
-    #                     filename=name+'.zip'
-    #                     filenames.append(filename)
-    #                     r = requests.get(url, allow_redirects=True)  # to get content after redirection
-    #                     with open(f'{scenario}/{filename}', 'wb') as f:
-    #                         f.write(r.content)
-    # return filenames
