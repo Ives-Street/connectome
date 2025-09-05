@@ -19,9 +19,7 @@ from setup.physical_conditions import (
     download_osm, make_osm_editable, get_GTFS_from_mobility_database
 )
 from setup.define_valuations import value
-=======
 from representation import apply_experience_defintions
->>>>>>> origin/main
 
 
 if __name__=='__main__':
