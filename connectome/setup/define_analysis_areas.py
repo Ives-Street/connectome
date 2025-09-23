@@ -68,7 +68,9 @@ def usa_tracts_from_address(
     # Combine all tracts
     if not union_tracts_list:
         raise ValueError("No tracts were successfully fetched from any state")
-    
+
+    #TODO: rename as concat, not union
+
     union_tracts = pd.concat(union_tracts_list, ignore_index=True)
     logger.info(f"Combined {len(union_tracts)} tracts from {len(states)} states")
     
@@ -77,6 +79,8 @@ def usa_tracts_from_address(
     union_tracts = pygris.utils.erase_water(union_tracts, area_threshold=water_threshold)
     final_count = len(union_tracts)
     logger.info(f"Removed water bodies: {original_count - final_count} tracts removed")
+    logger.info(f"Final tract count: {final_count}")
+
 
     union_tracts['geom_id'] = union_tracts['GEOID']
     union_tracts.index = union_tracts['geom_id'].values()
@@ -91,4 +95,6 @@ def usa_tracts_from_address(
             raise FileNotFoundError(f"Failed to save file to {save_to}: {e}")
     
     return union_tracts
+
+#TODO functionality for hexagons
 

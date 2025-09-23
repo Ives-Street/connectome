@@ -14,7 +14,10 @@ def populate_destinations_overture_places(geographies: gpd.GeoDataFrame) -> gpd.
     populate destinations for each tract
     '''
     # Get the bounding box of the geographies
+    bbox = geographies.total_bounds  # (minx, miny, maxx, maxy)
+=======
     bbox = list(geographies.total_bounds)  # [minx, miny, maxx, maxy]
+>>>>>>> origin/main
     # Download Places from Overture Maps within the bounding box
     places_gdf = core.geodataframe("place", bbox)
     places_gdf.crs=4326
@@ -23,6 +26,8 @@ def populate_destinations_overture_places(geographies: gpd.GeoDataFrame) -> gpd.
     joined = gpd.sjoin(places_gdf, geographies.to_crs(4326), predicate="within")
     counts = joined.groupby("index_right").size()
     geographies["overture_places"] = counts.reindex(geographies.index, fill_value=0)
+
+    #TODO include building size?
 
     return geographies
 
