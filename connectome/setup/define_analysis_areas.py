@@ -1,3 +1,5 @@
+import os
+
 import pandas as pd
 import geopandas as gpd
 import pygris.utils
@@ -75,10 +77,14 @@ def usa_tracts_from_address(
     union_tracts = pygris.utils.erase_water(union_tracts, area_threshold=water_threshold)
     final_count = len(union_tracts)
     logger.info(f"Removed water bodies: {original_count - final_count} tracts removed")
-    
+
+    union_tracts['geom_id'] = union_tracts['GEOID']
+    union_tracts.index = union_tracts['geom_id'].values()
+
     # Save to file if specified
     if save_to:
         try:
+            os.makedirs(os.path.dirname(save_to), exist_ok=True)
             union_tracts.to_file(save_to, driver='GPKG')
             logger.info(f"Successfully saved GeoDataFrame to {save_to}")
         except Exception as e:

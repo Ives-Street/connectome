@@ -17,6 +17,7 @@ from setup.populate_destinations import populate_all_dests_USA
 from setup.physical_conditions import (
     download_osm, make_osm_editable, get_GTFS_from_mobility_database
 )
+from routing import route_for_all_envs
 from representation import apply_experience_defintions
 
 
@@ -28,7 +29,7 @@ if __name__=='__main__':
     scenario_dir = f'{run_name}/existing_conditions'
     input_dir = f'{run_name}/existing_conditions/input_data'
 
-    #get tracts
+    #get geometries (tracts)
     if not os.path.exists(f"{input_dir}/analysis_geometry.gpkg"):
         print("fetching census tracts")
         states = ["VT"]
@@ -54,6 +55,7 @@ if __name__=='__main__':
             save_to = f"{input_dir}/subdemo_categories.csv"
         )
     else:
+        print("loading subdemo categories from disk")
         subdemo_categories = pd.read_csv(f"{input_dir}/subdemo_categories.csv")
 
     if not os.path.exists(f"{input_dir}/subdemo_statistics.csv"):
@@ -64,6 +66,7 @@ if __name__=='__main__':
             save_to=f"{input_dir}/subdemo_statistics.csv"
         )
     else:
+        print("loading subdemo membership statistics from disk")
         subdemo_statistics = pd.read_csv(f"{input_dir}/subdemo_statistics.csv")
 
     if not os.path.exists(f"{input_dir}/destination_statistics.gpkg"):
@@ -75,9 +78,11 @@ if __name__=='__main__':
             save_to=f"{input_dir}/destination_statistics.gpkg"
         )
     else:
+        print("loading destinations from disk")
         burlington_tracts_with_dests = gpd.read_file(f"{input_dir}/destination_statistics.gpkg")
 
     if not os.path.exists(f"{input_dir}/osm_study_area.pbf"):
+        print("downloading osm data")
         download_osm(
             burlington_tracts,
             f"{input_dir}/osm_large_file.pbf",
@@ -91,6 +96,7 @@ if __name__=='__main__':
             not os.path.exists(f"{input_dir}/GTFS/") or
             not any(p.suffix == ".zip" for p in Path(f"{input_dir}/GTFS/").iterdir())
     ):
+        print("downloading GTFS data")
         get_GTFS_from_mobility_database(burlington_tracts,
                                         f"{input_dir}/GTFS/",
                                         0.2)
@@ -104,14 +110,16 @@ if __name__=='__main__':
                                    f"{scenario_dir}/subdemo_categories_with_routeenvs.csv"
                                    )
     else:
+        print("loading experiences")
         subdemo_categories_with_routeenvs = pd.read_csv(f"{scenario_dir}/subdemo_categories_with_routeenvs.csv")
-#
-# routeenv_dir = "test_run_burlington/existing_conditions/routing"
-# routeenv = 'universal_re'
-# from r5py import TransportNetwork
-# gtfs_files = os.listdir(f"{routeenv_dir}/{routeenv}/gtfs_files")
-# gtfs_fullpaths = [f"{routeenv_dir}/{routeenv}/gtfs_files/{filename}" for filename in gtfs_files]
-# network = TransportNetwork(
-#     osm_pbf=f"{routeenv_dir}/{routeenv}/osm_file.pbf",
-#     gtfs=gtfs_fullpaths,
-# )
+
+    if not os.path.exists(f"{scenario_dir}/routing/universal_re/ttm_WALK.csv"):
+        print("routing")
+        route_for_all_envs(f"{scenario_dir}/routing",
+                           burlington_tracts_with_dests,
+                           subdemo_categories_with_routeenvs
+                           )
+    else:
+        print("loading routing results")
+        subdemo_categories_with_routeenvs = pd.read_csv(f"{scenario_dir}/subdemo_categories_with_routeenvs.csv")
+

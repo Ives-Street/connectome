@@ -61,7 +61,7 @@ def define_experiences(input_osm_filename: str,
         shutil.copytree(input_gtfs_dir, f"{destination_dir}/{bike_env_id}/gtfs_files/")
         #assign IDs
         selector = subdemo_categories['max_bicycle'] == f'bike_lts{lts}'
-        subdemo_categories.loc[selector,"routeenv_BIKE"] = bike_env_id
+        subdemo_categories.loc[selector,"routeenv_BICYCLE"] = bike_env_id
     if not save_subdemos_to == "":
         subdemo_categories.to_csv(save_subdemos_to)
     return subdemo_categories
