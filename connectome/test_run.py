@@ -35,21 +35,25 @@ if __name__=='__main__':
     parser.add_argument('--dests', help = 'run populate_destinations', action='store_true')
     parser.add_argument('--conditions', help = 'run physical_conditions', action='store_true')
     parser.add_argument('--valuations', help = 'run define_valuations', action='store_true')
+    parser.add_argument('--experiences', help = 'run define_experiences', action='store_true')
     #parser.add_argument('--all', help = 'run all three setup steps', action='store_true')
     args = parser.parse_args()
 
-    no_args = not any([args.areas, args.people, args.dests, args.conditions, args.valuations])
+    no_args = not any([args.areas, args.people, args.dests, args.conditions, args.valuations, args.experiences])
 
 
     run_name = "test_run"
     os.makedirs(run_name,exist_ok=True)
     os.makedirs(f"{run_name}/existing_conditions", exist_ok=True)
     os.makedirs(f"{run_name}/existing_conditions/input_data", exist_ok=True)
+    os.makedirs(f"{run_name}/scenario_dir", exist_ok=True)
+    
     input_dir = f'{run_name}/existing_conditions/input_data'
+    scenario_dir = f'{run_name}/scenario_dir'
+
 
     # Think this through a bit better...
     study_area_tracts = gpd.read_file(f"{input_dir}/analysis_geometry.gpkg")
-
     
     if args.areas or no_args:
         # get analysis area
@@ -128,16 +132,17 @@ if __name__=='__main__':
         study_area_tracts_with_dests = gpd.read_file(f"{input_dir}/destination_statistics.gpkg")
         print("example valuation:", value("low_income", "overture_places", 15, "morning"))
 
-    if not os.path.exists(f"{scenario_dir}/subdemo_categories_with_routeenvs.csv"):
-        print("defining experiences")
-        subdemo_categories_with_routeenvs = apply_experience_defintions(f"{input_dir}/osm_study_area.pbf",
-                                    f"{input_dir}/GTFS/",
-                                   subdemo_categories,
-                                   f"{scenario_dir}/routing/",
-                                   f"{scenario_dir}/subdemo_categories_with_routeenvs.csv"
-                                   )
-    else:
-        subdemo_categories_with_routeenvs = pd.read_csv(f"{scenario_dir}/subdemo_categories_with_routeenvs.csv")
+    if args.experiences or no_args:
+        if not os.path.exists(f"{scenario_dir}/subdemo_categories_with_routeenvs.csv"):
+            print("defining experiences")
+            subdemo_categories_with_routeenvs = apply_experience_defintions(f"{input_dir}/osm_study_area.pbf",
+                                        f"{input_dir}/GTFS/",
+                                        subdemo_categories,
+                                        f"{scenario_dir}/routing/",
+                                        f"{scenario_dir}/subdemo_categories_with_routeenvs.csv"
+                                        )
+        else:
+            subdemo_categories_with_routeenvs = pd.read_csv(f"{input_dir}/subdemo_categories_with_routeenvs.csv")
 #
 # routeenv_dir = "test_run_burlington/existing_conditions/routing"
 # routeenv = 'universal_re'
