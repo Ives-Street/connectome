@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 import pandas as pd
 import geopandas as gpd
@@ -83,7 +83,7 @@ def usa_tracts_from_address(
 
 
     union_tracts['geom_id'] = union_tracts['GEOID']
-    union_tracts.index = union_tracts['geom_id'].values()
+    union_tracts.index = union_tracts['geom_id'].values
 
     # Save to file if specified
     if save_to:

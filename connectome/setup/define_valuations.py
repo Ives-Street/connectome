@@ -9,7 +9,7 @@ import numpy as np
 #assume the average Place is visited 10x/day, the average job 1x/day, and the average person 0.05x/day
 # what categories does Overture Places include? all retail, food, entertainment, etc?
 VISIT_FREQ = {
-    "overture_places":10,
+    "overture_places":5,
     "lodes_jobs":1,
     "total_pop":0.05,
 }
@@ -21,10 +21,9 @@ VISIT_FREQ = {
 #TODO have this funciton take the dest_type
 def value(subdemo, dest_type, minute_equivalents, time_of_day) -> float:
     base_val = np.exp(-0.05 * minute_equivalents)
-    # subdemo? A little more complicated
 
     # weight by visit frequency/possibly weighted by size? - include this as an input?
-
+    val = base_val * VISIT_FREQ[dest_type]
 
     # weight by TOD (will come later)
 

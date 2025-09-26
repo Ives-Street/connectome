@@ -132,6 +132,8 @@ def get_GTFS_from_mobility_database(
         save_to_dir:
         min_overlap: Minimum overlap between feed bbox and geometry to justify inclusion. Default 0.1%.
     """
+    os.makedirs(save_to_dir, exist_ok=True)
+
     geometry_ll = geometry.to_crs(4326)
     study_poly = geometry_ll.union_all()  # merge into single polygon
     minx, miny, maxx, maxy = study_poly.bounds
@@ -161,7 +163,9 @@ def get_GTFS_from_mobility_database(
         data = response.json()
         print("called list of GTFS providers")
     else:
-        print(f"Error {response.status_code}: {response.text}")
+        print(f"Error in MobilityDatabase call {response.status_code}: {response.text}")
+        print("Exiting without GTFS download")
+        return
 
     # Filter by overlap
     selected_feeds = []
@@ -201,7 +205,6 @@ def get_GTFS_from_mobility_database(
             selected_feeds += feeds_without_bbox
 
     # Download selected feeds
-    os.makedirs(save_to_dir, exist_ok=True)
 
     for feed in selected_feeds:
         print("feed for", feed['provider'])

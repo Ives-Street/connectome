@@ -8,7 +8,8 @@ from census import Census
 from pandas import DataFrame
 from tqdm import tqdm
 
-from .pedestriansfirst import make_patches
+#IF I want to add this (rather than hexagon things), i'll include the function in this file.
+#from .OLDpedestriansfirst import make_patches
 
 acs_variables = {
     'B01003_001E': 'total_pop',
@@ -73,23 +74,23 @@ cyclist_distribution = {
 } # higher number = greater willingness to cycle in more challenging environments
 
 
-def create_subdemo_categories(tracts: gpd.GeoDataFrame,
+def create_userclasses(tracts: gpd.GeoDataFrame,
                               num_income_bins: int = 4,
                               save_to: str = "",
                               ) -> DataFrame:
     '''
-    define subdemographic categoris with factors relevant to transportation
+    define user classes with factors relevant to transportation
     
     DOES NOT INCLUDE factors that are not currently relevant to how the model
     evaluates transportation (race, ethnicity) - these are currently 
-    included in the subdemo DF
+    included in the userclass DF
     
     all analysis area geographies will have the same subdemographic groups
     (different numbers per analysis area, of course)
     this will make evaluation much more efficient
     
     output dataframe:
-        index: subdemographic category ID
+        index: user class category ID
         max_income: income ceiling
         max_cycle: cycle LTS ceiling 
     '''
@@ -99,7 +100,7 @@ def create_subdemo_categories(tracts: gpd.GeoDataFrame,
         get_acs_data_for_tracts(tracts)
     income_bin_edges = identify_bins(tracts, num_income_bins)
 
-    subdemo_categories = pd.DataFrame(columns=[
+    user_classes = pd.DataFrame(columns=[
         'max_income',
         'max_bicycle'
     ])
@@ -107,34 +108,34 @@ def create_subdemo_categories(tracts: gpd.GeoDataFrame,
     #TODO - replace with a more pythonic function, there must be one in a std lib
     for max_income in income_bin_edges[1:]:
         for max_bicycle in cyclist_distribution.keys():
-            next_idx = subdemo_categories.shape[0] + 1
+            next_idx = user_classes.shape[0] + 1
             row_data = {
                 'max_income': max_income,
                 'max_bicycle': max_bicycle,
             }
-            subdemo_categories.loc[next_idx] = row_data
+            user_classes.loc[next_idx] = row_data
 
     if save_to:
-        subdemo_categories.to_csv(save_to)
+        user_classes.to_csv(save_to)
 
-    return subdemo_categories
+    return user_classes
 
 
-def create_subdemo_statistics(tracts: gpd.GeoDataFrame,
-                              subdemo_categories: object,
+def create_userclass_statistics(tracts: gpd.GeoDataFrame,
+                              user_classes,
                               tolerance: float = 0.02,
                               save_to: str = "",  #'existing_conditions/subdemos.csv'
                               ) -> DataFrame:
     '''
     creates a dataframe (not geo) with all the many subdemographic groups / user classes
     
-    includes an ID refrence to the demographic subgroup that contains factors 
+    includes an ID refrence to the demographic user class that contains factors
     relevant to mode choice (income, willingness to cycle)
     and includes all demographic factors NOT relevant to mode choice here
     
     output dataframe:
         geom_id: index of corresponding shape in tracts
-        subdemo_category_id: index of relevant mode choice factors
+        user_class_id: index of relevant mode choice factors
         population: population
         TODO: households: households
         race: 'white'/'black'/'asian'/'other'
@@ -142,12 +143,12 @@ def create_subdemo_statistics(tracts: gpd.GeoDataFrame,
     '''
     if not list(acs_variables.keys())[0] in tracts.columns:
         get_acs_data_for_tracts(tracts)
-    income_maxes = subdemo_categories.max_income.unique()
+    income_maxes = user_classes.max_income.unique()
 
-    sub_demos = pd.DataFrame(columns=[
+    userclass_stats = pd.DataFrame(columns=[
         'geom_id',
         'population',
-        'subdemo_category_id',
+        'user_class_id',
         'race',
         'hispanic_or_latino',
     ])
@@ -214,37 +215,38 @@ def create_subdemo_statistics(tracts: gpd.GeoDataFrame,
                             else:
                                 race_cycle_hisplat_car_pop = race_cycle_hisplat_pop * (1 - percent_with_car)
 
-                            subdemo_category = subdemo_categories[
-                                (subdemo_categories['max_income'] == income_bin[0]) &
-                                (subdemo_categories['max_bicycle'] == f'bike_lts{lts}')]
-                            subdemo_id = subdemo_category.index[0]
+                            user_class = user_classes[
+                                (user_classes['max_income'] == income_bin[0]) &
+                                (user_classes['max_bicycle'] == f'bike_lts{lts}')]
+                            user_class_id = user_class.index[0]
 
-                            subgroup = pd.Series({
+                            userclass_stat = pd.Series({
                                 'geom_id': geom_id,
                                 'population': race_cycle_hisplat_car_pop,
-                                'subdemo_category_id': subdemo_id,
+                                'user_class_id': user_class_id,
                                 'race': race,
                                 'hispanic_or_latino': hisp_lat,
                                 'car_owner': car_owner,
                             })
-                            sub_demos.loc[len(sub_demos)] = subgroup
-    print(int(sub_demos.population.sum()), tracts.B01003_001E.sum())
+                            userclass_stats.loc[len(userclass_stats)] = userclass_stat
+    print(int(userclass_stats.population.sum()), tracts.B01003_001E.sum())
     totalpop_lower_bound = (1 - tolerance) * tracts.B01003_001E.sum()
     totalpop_upper_bound = (1 + tolerance) * tracts.B01003_001E.sum()
-    print(totalpop_lower_bound, int(sub_demos.population.sum()), totalpop_upper_bound)
-    assert totalpop_lower_bound <= int(sub_demos.population.sum()) <= totalpop_upper_bound
+    print(totalpop_lower_bound, int(userclass_stats.population.sum()), totalpop_upper_bound)
+    assert totalpop_lower_bound <= int(userclass_stats.population.sum()) <= totalpop_upper_bound
 
     if not save_to == False:
-        sub_demos.to_csv(save_to)
+        userclass_stats.to_csv(save_to)
         #TODO: test below code
 
-    return sub_demos
+    return userclass_stats
 
 
 GHS_FILENAME = 'GHS_POP_E2020_GLOBE_R2023A_54009_1000_V1_0.tif'
 
 
 #TODO divide into two functions? Create grid, and then populate based on census data?
+#TODO use hexagons instead of grid?
 def divide_tracts_to_grid(tracts,
                           sub_demos,
                           grid_size=1000,

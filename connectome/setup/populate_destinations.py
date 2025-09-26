@@ -14,18 +14,23 @@ def populate_destinations_overture_places(geographies: gpd.GeoDataFrame) -> gpd.
     populate destinations for each tract
     '''
     # Get the bounding box of the geographies
-    bbox = geographies.total_bounds  # (minx, miny, maxx, maxy)
-=======
     bbox = list(geographies.total_bounds)  # [minx, miny, maxx, maxy]
->>>>>>> origin/main
+
     # Download Places from Overture Maps within the bounding box
-    places_gdf = core.geodataframe("place", bbox)
-    places_gdf.crs=4326
+    # Try default release first; fall back to "latest" if that path doesn't exist
+    try:
+        places_gdf = core.geodataframe("place", bbox)
+    except FileNotFoundError:
+        print("ERROR in Overture download: NOT adding overture destinations")
+        return geographies
+    # Ensure CRS is set to WGS84 for joining
+    places_gdf = places_gdf.set_crs(4326, allow_override=True)
 
     #find number of Places within each input analysis area
-    joined = gpd.sjoin(places_gdf, geographies.to_crs(4326), predicate="within")
+    geographies_ll = geographies.to_crs(4326)
+    joined = gpd.sjoin(places_gdf, geographies_ll, predicate="within")
     counts = joined.groupby("index_right").size()
-    geographies["overture_places"] = counts.reindex(geographies.index, fill_value=0)
+    geographies["overture_places"] = counts.reindex(geographies_ll.index, fill_value=0).values
 
     #TODO include building size?
 
@@ -40,20 +45,22 @@ def populate_destinations_LODES_jobs(geographies: gpd.GeoDataFrame,
         geographies['lodes_jobs'] = geographies['GEOID'].map(lodes_wac.set_index("w_geocode")["C000"])
         return geographies
     else: #calculate based on blocks then aggregate up to analysis geometry TODO: TEST THIS!
-        geographies_ll = geographies.to_crs(4326)
-        lodes_wac = get_lodes(state, year=2022, lodes_type="wac", agg_level="block", return_lonlat=True)
-        lodes_wac = gpd.GeoDataFrame(
-            lodes_wac,
-            geometry=gpd.points_from_xy(Y.w_lon, Y.w_lat),
-            crs=4326
-        )
-        #count sum of all C000 jobs within each geography poly
-        #todo this could be more rigorous - it's possible to slip through the cracks,
-        # like if a block centroid is in a body of water
-        joined = gpd.sjoin(lodes_wac, geographies_ll, how="inner", predicate="within")
-        sums = joined.groupby(joined.index_right)["C000"].sum()
-        geographies_ll["C000_sum"] = geographies_ll.index.map(sums).fillna(0)
-        return geographies_ll.to_crs(geographies.crs)
+        raise RuntimeError("not yet implemented")
+        # geographies_ll = geographies.to_crs(4326)
+        # lodes_wac = get_lodes(state, year=2022, lodes_type="wac", agg_level="block", return_lonlat=True)
+        # lodes_wac = gpd.GeoDataFrame(
+        #     lodes_wac,
+        #     geometry=gpd.points_from_xy(Y.w_lon, Y.w_lat),
+        #     crs=4326
+        # )
+        # #count sum of all C000 jobs within each geography poly
+        # #todo this could be more rigorous - it's possible to slip through the cracks,
+        # # like if a block centroid is in a body of water
+        # joined = gpd.sjoin(lodes_wac, geographies_ll, how="inner", predicate="within")
+        # sums = joined.groupby(joined.index_right)["C000"].sum()
+        # geographies_ll["C000_sum"] = geographies_ll.index.map(sums).fillna(0)
+        # geographies_ll["C000_sum"] = geographies_ll.index.map(sums).fillna(0)
+        # return geographies_ll.to_crs(geographies.crs)
 
 
 def populate_all_dests_USA(geographies: gpd.GeoDataFrame,
@@ -63,7 +70,8 @@ def populate_all_dests_USA(geographies: gpd.GeoDataFrame,
                             ) -> gpd.GeoDataFrame:
     with_overture = populate_destinations_overture_places(geographies)
     with_lodes = populate_destinations_LODES_jobs(with_overture, state, already_tracts)
-    if not save_to == False:
+    # Only save if a non-empty path is provided
+    if save_to:
         with_lodes.to_file(save_to)
 
     return with_lodes
