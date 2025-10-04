@@ -1,7 +1,4 @@
-import geopandas as gpd
-from tqdm import tqdm
-import geojson
-import json
+
 import os
 import osmnx as ox
 import subprocess
@@ -10,11 +7,11 @@ import requests
 import shapely.geometry
 import geopandas as gpd
 from mobility_db_api import MobilityAPI
-from shapely.ops import unary_union
-from pathlib import Path
-import string
 
-#import prep_bike_osm
+import zipfile
+import tempfile
+import shutil
+
 
 os.environ['MOBILITY_API_REFRESH_TOKEN'] = open("mobility_db_refresh_token.txt").read().rstrip("\n")
 
@@ -117,12 +114,73 @@ def download_osm(geometry: gpd.GeoDataFrame, #unbuffered
 def make_osm_editable(pbf_file, osm_file):
     command = f"osmconvert {pbf_file} -o={osm_file}"
     subprocess.check_call(command.split(' '))
-    
+
+
+def sanitize_gtfs_file(gtfs_path):
+    """
+    Remove empty optional GTFS tables that cause r5py to fail.
+
+    Args:
+        gtfs_path: Path to the GTFS .zip file
+
+    Returns:
+        Path to the sanitized GTFS file (same as input, modified in place)
+    """
+    # Tables that can be empty and cause issues
+    optional_tables = [
+        'fare_attributes.txt',
+        'fare_rules.txt',
+        'frequencies.txt',
+        'transfers.txt'
+    ]
+
+    print(f"Sanitizing GTFS file: {os.path.basename(gtfs_path)}")
+
+    # Create a temporary directory
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_zip = os.path.join(temp_dir, 'temp.zip')
+
+        # Track which files to keep
+        files_to_remove = []
+
+        # Check which optional tables are empty
+        with zipfile.ZipFile(gtfs_path, 'r') as zip_read:
+            for table in optional_tables:
+                if table in zip_read.namelist():
+                    # Read the file
+                    with zip_read.open(table) as f:
+                        content = f.read().decode('utf-8').strip()
+                        lines = content.split('\n')
+
+                        # Check if file only contains header or is empty
+                        if len(lines) <= 1 or (len(lines) == 2 and lines[1].strip() == ''):
+                            files_to_remove.append(table)
+                            print(f"  - Removing empty table: {table}")
+
+        # If there are files to remove, create a new zip without them
+        if files_to_remove:
+            with zipfile.ZipFile(gtfs_path, 'r') as zip_read:
+                with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_DEFLATED) as zip_write:
+                    for item in zip_read.namelist():
+                        if item not in files_to_remove:
+                            data = zip_read.read(item)
+                            zip_write.writestr(item, data)
+
+            # Replace original file with sanitized version
+            shutil.move(temp_zip, gtfs_path)
+            print(f"  ✓ Sanitized {len(files_to_remove)} empty table(s)")
+        else:
+            print(f"  ✓ No empty tables found")
+
+    return gtfs_path
+
+
 def get_GTFS_from_mobility_database(
         geometry: gpd.GeoDataFrame, #unbuffered
         save_to_dir: str,
         min_overlap: float = 0.001,
         include_no_bbox: bool = False,
+        sanitize_for_r5py: bool = True
         ):
     """
     Downloads GTFS feeds from the Mobility Database API and saves them to the specified directory.
@@ -225,5 +283,8 @@ def get_GTFS_from_mobility_database(
         with open(outfile, "wb") as f:
             for chunk in r.iter_content(8192):
                 f.write(chunk)
+
+        if sanitize_for_r5py == True:
+            sanitize_gtfs_file(outfile)
 
     print("Download complete")

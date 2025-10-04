@@ -1,4 +1,6 @@
 import numpy as np
+import pandas as pd
+
 #maybe eventually this will have some fancy means of dynamically generating functions for various pairs
 #for now let's keep it simple
 
@@ -11,21 +13,39 @@ import numpy as np
 VISIT_FREQ = {
     "overture_places":5,
     "lodes_jobs":1,
-    "total_pop":0.05,
+    "total_pop":0.01,
 }
 
 # read in overture places categories and assign overture json to appropriate category
 # ^^ probably not necessary since json includes categories
 # How many categories we thinking?
 
-#TODO have this funciton take the dest_type
-def value(subdemo, dest_type, minute_equivalents, time_of_day) -> float:
-    base_val = np.exp(-0.05 * minute_equivalents)
+# TODO: move this to populate_destinations.py?
+def generalize_destination_units(geoms_with_dests,
+                                 visit_freqs=VISIT_FREQ,
+                                 warn_missing=True):
+    """Calculate total number of visits to each geometry based on destination types.
+    
+    Args:
+        geoms_with_dests: GeoDataFrame containing geometries and their destinations
+        visit_freqs: Dictionary mapping destination types to visit frequencies
+        warn_missing: If True, warn when destination types are not found in columns
+    
+    Returns:
+        GeoDataFrame with total visits per geometry
+    
+    Note:
+        Destination types from visit_freqs that are not present in geoms_with_dests
+        columns will be ignored with an optional warning.
+    """
+    general_dests = pd.Series(0, index=geoms_with_dests.index)
 
-    # weight by visit frequency/possibly weighted by size? - include this as an input?
-    val = base_val * VISIT_FREQ[dest_type]
+    for dest_type, freq in visit_freqs.items():
+        if dest_type in geoms_with_dests.columns:
+            general_dests += geoms_with_dests[dest_type] * freq
+        elif warn_missing:
+            print(f"Warning: destination type '{dest_type}' not found in input data")
 
-    # weight by TOD (will come later)
+    geoms_with_dests['general_destinations'] = general_dests
+    return geoms_with_dests
 
-
-    return val

@@ -7,6 +7,7 @@ import rasterstats
 from census import Census
 from pandas import DataFrame
 from tqdm import tqdm
+import numpy as np
 
 #IF I want to add this (rather than hexagon things), i'll include the function in this file.
 #from .OLDpedestriansfirst import make_patches
@@ -73,7 +74,6 @@ cyclist_distribution = {
     'bike_lts0': 0.31,  #will not bike
 } # higher number = greater willingness to cycle in more challenging environments
 
-
 def create_userclasses(tracts: gpd.GeoDataFrame,
                               num_income_bins: int = 4,
                               save_to: str = "",
@@ -102,18 +102,24 @@ def create_userclasses(tracts: gpd.GeoDataFrame,
 
     user_classes = pd.DataFrame(columns=[
         'max_income',
-        'max_bicycle'
+        'max_bicycle',
+        'car_owner',
+        'user_class_id',
     ])
     #find all permutations of relevant variables
     #TODO - replace with a more pythonic function, there must be one in a std lib
     for max_income in income_bin_edges[1:]:
         for max_bicycle in cyclist_distribution.keys():
-            next_idx = user_classes.shape[0] + 1
-            row_data = {
-                'max_income': max_income,
-                'max_bicycle': max_bicycle,
-            }
-            user_classes.loc[next_idx] = row_data
+            for car_owner in ["car","nocar"]:
+                next_idx = user_classes.shape[0] + 1
+                user_class_id = f'{round(max_income)}_{max_bicycle[5:]}_{car_owner}'
+                row_data = {
+                    'max_income': max_income,
+                    'max_bicycle': max_bicycle,
+                    'car_owner': car_owner,
+                    'user_class_id': user_class_id,
+                }
+                user_classes.loc[next_idx] = row_data
 
     if save_to:
         user_classes.to_csv(save_to)
@@ -174,9 +180,9 @@ def create_userclass_statistics(tracts: gpd.GeoDataFrame,
                                             by_race['black'],
                                             by_race['asian']])
 
-        hh_with_car = tracts.loc[tract_idx, 'B08201_001E']
-        hh_without_car = tracts.loc[tract_idx, 'B08201_001E']
-        percent_with_car = hh_with_car / (hh_without_car + hh_with_car)
+        total_hh = tracts.loc[tract_idx, 'B08201_001E']
+        hh_without_car = tracts.loc[tract_idx, 'B08201_002E']
+        percent_with_car = 1 - (hh_without_car / total_hh)
         #note - we are assuming that car ownership is at the household level, and all
         # people within a household have a car for every trip if the household does. This is CONSERVATIVE.
 
@@ -187,9 +193,17 @@ def create_userclass_statistics(tracts: gpd.GeoDataFrame,
             if quintile_income is None:
                 print("NONEEEEE")
                 continue
-            bin_max = min([x for x in income_maxes
+            if np.isnan(quintile_income): #the tract is so small that the quintile income is null
+                # default to the middle income bin, rounding down
+                # TODO: make this more robust, possibly in a broader synth-pop overhaul
+                middle_index = len(income_maxes) // 2
+                quintile_income = income_maxes[middle_index]
+            try:
+                bin_max = min([x for x in income_maxes
                            if x >= quintile_income])
-            income_bin_pops[bin_max] += tract_pop / 5  # divide by 5 because census quintiles
+                income_bin_pops[bin_max] += tract_pop / 5  # divide by 5 because census quintiles
+            except ValueError:
+                import pdb; pdb.set_trace()
 
         #create subgroups / user classes by nested choices
         #there must be a more elegant way to do this, but this works for now
@@ -209,16 +223,18 @@ def create_userclass_statistics(tracts: gpd.GeoDataFrame,
                             race_cycle_hisplat_pop = race_cycle_pop * pct_hisp_lat
                         else:
                             race_cycle_hisplat_pop = race_cycle_pop * (1 - pct_hisp_lat)
-                        for car_owner in [True, False]: #5: Car owner
-                            if car_owner:
+                        for car_owner in ["car","nocar"]: #5: Car owner
+                            if car_owner == "car":
                                 race_cycle_hisplat_car_pop = race_cycle_hisplat_pop * percent_with_car
                             else:
                                 race_cycle_hisplat_car_pop = race_cycle_hisplat_pop * (1 - percent_with_car)
 
                             user_class = user_classes[
                                 (user_classes['max_income'] == income_bin[0]) &
-                                (user_classes['max_bicycle'] == f'bike_lts{lts}')]
-                            user_class_id = user_class.index[0]
+                                (user_classes['max_bicycle'] == f'bike_lts{lts}') &
+                                (user_classes['car_owner'] == car_owner)]
+                            assert len(user_class["user_class_id"].unique()) == 1
+                            user_class_id = user_class["user_class_id"].unique()[0]
 
                             userclass_stat = pd.Series({
                                 'geom_id': geom_id,

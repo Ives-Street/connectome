@@ -18,9 +18,12 @@ from setup.populate_destinations import populate_all_dests_USA, populate_destina
 from setup.physical_conditions import (
     download_osm, make_osm_editable, get_GTFS_from_mobility_database
 )
-from setup.define_valuations import value
+from setup.define_valuations import generalize_destination_units
 from routing import route_for_all_envs
 from representation import apply_experience_defintions
+from evaluation import evaluate_scenario
+
+import communication
 
 # I removed the usage of argparse becuase it was preventing me from running this in the pycharm interactive shell
 # Can add it back later, but honestly I don't see anyone using this from the commandline for a while.
@@ -47,10 +50,15 @@ from representation import apply_experience_defintions
     # no_args = not any([args.areas, args.people, args.dests, args.conditions, args.valuations])
 
 #Parameters for testing
-run_name = "burlington_test"
-states = ["VT"]
-address = "26 University Pl, Burlington, VT 05405"
-buffer = 3000
+# run_name = "burlington_test"
+# states = ["VT"]
+# address = "26 University Pl, Burlington, VT 05405"
+# buffer = 3000
+run_name = "pgh_test"
+states = ["PA"]
+address = "210 Forbes Ave, Pittsburgh, PA 15222"
+buffer = 10000
+
 
 
 os.makedirs(run_name,exist_ok=True)
@@ -85,6 +93,8 @@ if not os.path.exists(f"{input_dir}/user_classes.csv"):
 else:
     print("loading user classes from disk")
     user_classes = pd.read_csv(f"{input_dir}/user_classes.csv")
+    user_classes.index = user_classes.user_class_id.values
+    user_classes.fillna("",inplace=True)
 
 if not os.path.exists(f"{input_dir}/userclass_statistics.csv"):
     print("calculating user class statistics")
@@ -102,7 +112,7 @@ if not os.path.exists(f"{input_dir}/destination_statistics.gpkg"):
     print("populating overture destinations")
     study_area_tracts_with_dests = populate_all_dests_USA(
         study_area_tracts,
-        "VT",
+        states[0],
         True,
         save_to=f"{input_dir}/destination_statistics.gpkg"
     )
@@ -124,17 +134,17 @@ if not os.path.exists(f"{input_dir}/osm_study_area.pbf"):
 
 
 if (
-        not os.path.exists(f"{input_dir}/GTFS/") or
-        not any(p.suffix == ".zip" for p in Path(f"{input_dir}/GTFS/").iterdir())
+        not os.path.exists(f"{input_dir}/GTFS/")# or
+        #not any(p.suffix == ".zip" for p in Path(f"{input_dir}/GTFS/").iterdir())
 ):
     print("downloading GTFS data")
     get_GTFS_from_mobility_database(study_area_tracts,
                                     f"{input_dir}/GTFS/",
                                     0.2)
 
-if not os.path.exists(f"{scenario_dir}/input_data/user_classes_with_routeenvs.csv"):
+if not os.path.exists(f"{scenario_dir}/routing/user_classes_with_routeenvs.csv"):
     print("defining experiences")
-    user_clases_with_routeenvs = apply_experience_defintions(f"{input_dir}/osm_study_area.pbf",
+    user_classes_w_routeenvs = apply_experience_defintions(f"{input_dir}/osm_study_area.pbf",
                                 f"{input_dir}/GTFS/",
                                                              user_classes,
                                f"{scenario_dir}/routing/",
@@ -142,15 +152,22 @@ if not os.path.exists(f"{scenario_dir}/input_data/user_classes_with_routeenvs.cs
                                                              )
 else:
     print("loading experiences")
-    user_clases_with_routeenvs = pd.read_csv(f"{scenario_dir}/routing/user_classes_with_routeenvs.csv")
+    user_classes_w_routeenvs = pd.read_csv(f"{scenario_dir}/routing/user_classes_with_routeenvs.csv")
+    user_classes_w_routeenvs.index = user_classes_w_routeenvs.user_class_id.values
+    user_classes_w_routeenvs.fillna("", inplace=True)
 
 if not os.path.exists(f"{scenario_dir}/routing/universal_re/ttm_WALK.csv"):
     print("routing")
     route_for_all_envs(f"{scenario_dir}/routing",
                        study_area_tracts_with_dests,
-                       user_clases_with_routeenvs
+                       user_classes_w_routeenvs
                        )
 else:
-    print("loading routing results")
-    user_clases_with_routeenvs = pd.read_csv(f"{scenario_dir}/input_data/user_classes_with_routeenvs.csv")
+    print("routing already done. skipping.")
 
+if not os.path.exists(f"{scenario_dir}/results/geometry_results.geojson"):
+    print("evaluating")
+    evaluate_scenario(scenario_dir, user_classes_w_routeenvs, userclass_statistics, study_area_tracts_with_dests)
+    communication.visualize_results_by_geometry(scenario_dir)
+else:
+    print("scenario has already been run")

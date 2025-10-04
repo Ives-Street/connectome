@@ -127,23 +127,23 @@ def add_lts_tags(osm_filename: str, out_filename: str, max_lts: int = 3) -> None
     writer = osmium.SimpleWriter(out_filename)
     ltsadder = SimplestLTSAdder(writer, max_lts)
     ltsadder.apply_file(osm_filename)
-    print(f'With max_lts {max_lts}, added lts=x to {ltsadder.n_modified_ways}')
+    print(f'With max_lts {max_lts}, added lts=1,2, or 3 to {ltsadder.n_modified_ways}')
 
 
 def define_experiences(input_osm_filename: str,
                        input_gtfs_dir: str,
-                       subdemo_categories: pd.DataFrame,
+                       user_classes: pd.DataFrame,
                        destination_dir: str,
-                       save_subdemos_to: str,
-) -> pd.DataFrame:
+                       save_userclasses_to: str,
+                       ) -> pd.DataFrame:
     """
     Creates a new directory "routing environment" with OSM/GTFS files reflecting conditions as experienced
-    by each combination of subdemographic group and mode
-    Also assign each subdemo/mode combination to a routing environment.
+    by each combination of user class and mode
+    Also assign each class/mode combination to a routing environment.
     Args:
         input_osm_filename:
         input_gtfs_dir:
-        subdemo_categories:
+        user_classes:
         destination_dir:
     """
     os.makedirs(destination_dir, exist_ok=True)
@@ -156,21 +156,21 @@ def define_experiences(input_osm_filename: str,
     os.makedirs(f"{destination_dir}/{universal_routing_env_id}", exist_ok=True)
     # 2) copy the GTFS and OSM
     shutil.copy(input_osm_filename,f"{destination_dir}/{universal_routing_env_id}/osm_file.pbf")
-    shutil.copytree(input_gtfs_dir, f"{destination_dir}/{universal_routing_env_id}/gtfs_files/")
+    shutil.copytree(input_gtfs_dir, f"{destination_dir}/{universal_routing_env_id}/gtfs_files/",dirs_exist_ok=True)
     # 3) create a parameters file for r5 routing
     r5_params = {
     }
     with open(f"{destination_dir}/{universal_routing_env_id}/r5_params.json", 'w') as f:
         json.dump(r5_params, f)
 
-    # 4) assign that ID to the subdemo_categories dataframe
-    subdemo_categories.loc[:, "routeenv_CAR"] = universal_routing_env_id
-    subdemo_categories.loc[:, "routeenv_TRANSIT"] = universal_routing_env_id
-    subdemo_categories.loc[:, "routeenv_WALK"] = universal_routing_env_id
+    # 4) assign that ID to the user_classes dataframe
+    user_classes.loc[user_classes.car_owner == "car", "routeenv_CAR"] = universal_routing_env_id
+    user_classes.loc[:, "routeenv_TRANSIT"] = universal_routing_env_id
+    user_classes.loc[:, "routeenv_WALK"] = universal_routing_env_id
 
     # next let's do the bike options
-    # we're ALSO going to take LTS into account in representation.py
-    LTSs = [int(item[-1:]) for item in subdemo_categories['max_bicycle'].unique()]
+
+    LTSs = [1,2,4] # by definition, we don't need to create a routing environment for lts=0
     for lts in LTSs:
         bike_env_id = f"bike_re_lts{lts}"
         # 1) make the directory
@@ -191,8 +191,8 @@ def define_experiences(input_osm_filename: str,
             json.dump(r5_params, f)
 
         # 4) assign IDs
-        selector = subdemo_categories['max_bicycle'] == f'bike_lts{lts}'
-        subdemo_categories.loc[selector,"routeenv_BICYCLE"] = bike_env_id
-    if not save_subdemos_to == "":
-        subdemo_categories.to_csv(save_subdemos_to)
-    return subdemo_categories
+        selector = user_classes['max_bicycle'] == f'bike_lts{lts}'
+        user_classes.loc[selector, "routeenv_BICYCLE"] = bike_env_id
+    if not save_userclasses_to == "":
+        user_classes.to_csv(save_userclasses_to)
+    return user_classes

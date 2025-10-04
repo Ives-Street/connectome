@@ -21,6 +21,7 @@ def usa_tracts_from_address(
     buffer: float = DEFAULT_BUFFER_DISTANCE,
     save_to: Optional[str] = None,
     water_threshold: float = DEFAULT_WATER_THRESHOLD,
+    year: int = 2022,  # Add year parameter
 ) -> gpd.GeoDataFrame:
     """
     Fetch and process US census tracts based on an address and buffer distance.
@@ -35,6 +36,7 @@ def usa_tracts_from_address(
         buffer: Buffer distance in meters around the address (default: 10000)
         save_to: Optional file path to save the resulting GeoDataFrame (default: None)
         water_threshold: Threshold for water body removal (default: 0.1)
+        year: Census year to use for tract data (default: 2022)
     
     Returns:
         GeoDataFrame: Processed census tracts with water bodies removed
@@ -57,6 +59,7 @@ def usa_tracts_from_address(
             tracts = pygris.tracts(
                 cb=True,
                 state=state,
+                year=year,
                 subset_by={address: buffer}
             )
             union_tracts_list.append(tracts)
@@ -76,9 +79,15 @@ def usa_tracts_from_address(
     
     # Remove water bodies
     original_count = len(union_tracts)
-    union_tracts = pygris.utils.erase_water(union_tracts, area_threshold=water_threshold)
-    final_count = len(union_tracts)
-    logger.info(f"Removed water bodies: {original_count - final_count} tracts removed")
+
+    try:
+        union_tracts = pygris.utils.erase_water(union_tracts, year=year, area_threshold=water_threshold)
+        final_count = len(union_tracts)
+        logger.info(f"Removed water bodies: {original_count - final_count} tracts removed")
+    except Exception as e:
+       print(f"Error removing water bodies. WATER BODIES NOT REMOVED")
+       final_count = len(union_tracts)
+
     logger.info(f"Final tract count: {final_count}")
 
 
