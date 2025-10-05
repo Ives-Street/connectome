@@ -164,7 +164,9 @@ def define_experiences(input_osm_filename: str,
         json.dump(r5_params, f)
 
     # 4) assign that ID to the user_classes dataframe
-    user_classes.loc[user_classes.car_owner == "car", "routeenv_CAR"] = universal_routing_env_id
+    user_classes.loc[:, "routeenv_CAR"] = universal_routing_env_id
+    # even userclasses without a car will use universal routing env to route car,
+    # they just will only have the choice of ridehail later
     user_classes.loc[:, "routeenv_TRANSIT"] = universal_routing_env_id
     user_classes.loc[:, "routeenv_WALK"] = universal_routing_env_id
 

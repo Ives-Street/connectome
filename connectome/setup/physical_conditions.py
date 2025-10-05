@@ -245,11 +245,13 @@ def get_GTFS_from_mobility_database(
 
         intersection = study_poly.intersection(feed_poly)
         if not intersection.is_empty:
-            print('intersection is not empty')
             overlap_ratio = intersection.area / feed_poly.area
-            print(overlap_ratio)
+            print('intersection is not empty. Overlap_ratio:', overlap_ratio)
             if overlap_ratio >= min_overlap:
+                print("overlap is sufficient. including feed")
                 selected_feeds.append(feed)
+            else:
+                print("overlap is insufficient. skipping feed")
 
 
     if len(selected_feeds) > 0:

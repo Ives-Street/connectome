@@ -127,28 +127,28 @@ def create_userclasses(tracts: gpd.GeoDataFrame,
     return user_classes
 
 
-def create_userclass_statistics(tracts: gpd.GeoDataFrame,
-                              user_classes,
-                              tolerance: float = 0.02,
-                              save_to: str = "",  #'existing_conditions/subdemos.csv'
-                              ) -> DataFrame:
-    '''
-    creates a dataframe (not geo) with all the many subdemographic groups / user classes
+def create_userclass_statistics(
+    tracts: gpd.GeoDataFrame,
+    user_classes: pd.DataFrame,
+    save_to: str = ""
+) -> pd.DataFrame:
+    """Calculate statistics for each user class.
     
-    includes an ID refrence to the demographic user class that contains factors
-    relevant to mode choice (income, willingness to cycle)
-    and includes all demographic factors NOT relevant to mode choice here
+    Args:
+        tracts: GeoDataFrame of census tracts (should be in WGS84)
+        user_classes: DataFrame of user class definitions
+        save_to: Optional path to save results
+        
+    Returns:
+        DataFrame with user class statistics
+    """
+    # Ensure WGS84
+    if tracts.crs != "EPSG:4326":
+        tracts = tracts.to_crs("EPSG:4326")
     
-    output dataframe:
-        geom_id: index of corresponding shape in tracts
-        user_class_id: index of relevant mode choice factors
-        population: population
-        TODO: households: households
-        race: 'white'/'black'/'asian'/'other'
-        hispanic_or_latino: True / False
-    '''
-    if not list(acs_variables.keys())[0] in tracts.columns:
-        get_acs_data_for_tracts(tracts)
+    # For area calculations, temporarily project to Mollweide equal area
+    tracts_mw = tracts.to_crs('ESRI:54009')
+    
     income_maxes = user_classes.max_income.unique()
 
     userclass_stats = pd.DataFrame(columns=[
@@ -246,6 +246,7 @@ def create_userclass_statistics(tracts: gpd.GeoDataFrame,
                             })
                             userclass_stats.loc[len(userclass_stats)] = userclass_stat
     print(int(userclass_stats.population.sum()), tracts.B01003_001E.sum())
+    tolerance=0.02
     totalpop_lower_bound = (1 - tolerance) * tracts.B01003_001E.sum()
     totalpop_upper_bound = (1 + tolerance) * tracts.B01003_001E.sum()
     print(totalpop_lower_bound, int(userclass_stats.population.sum()), totalpop_upper_bound)

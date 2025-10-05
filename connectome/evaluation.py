@@ -5,11 +5,15 @@ import numpy as np
 
 from tqdm import tqdm
 
+import communication
+
+
 MODES = [ #todo - make this universal for the whole codebase
     "CAR",
     "TRANSIT",
     "WALK",
     "BICYCLE",
+    "RIDEHAIL",
 ]
 
 #def evaluate_scenario(scenario_dir):
@@ -26,20 +30,20 @@ MODES = [ #todo - make this universal for the whole codebase
 # 2) identify the mode choice for each O/D pair
     # Record which mode is chosen for each cell
     # Create a unified matrix representing the lowest cost for each O/D pair
-# 3) apply decay function to each cell of the generalized ttm, to get per-destination value for each O/D pair
-# 4) multiply the decayed ttm by the destination density to get a total utility for each O/D pair
+# 3) apply decay function to each cell of the generalized gtm, to get per-destination value for each O/D pair
+# 4) multiply the decayed gtm by the destination density to get a total utility for each O/D pair
 # 5) sum the total utility of the user class
     # broken down by mode
 
-def generalize_cost(user_class, ttm, cost_matrix = None, comfort_matrix = None):
+def generalize_cost(user_class, gtm, cost_matrix = None, comfort_matrix = None):
     if cost_matrix is not None or comfort_matrix is not None:
         raise ValueError("Cost and comfort matrices are not yet supported.")
     else:
-        return ttm
+        return gtm
 
 
 
-def load_ttm(filename):
+def load_gtm(filename):
     """" Loads a travel time matrix from a CSV file
 
     Currently provides index and column names as strings, for maximum flexibility.
@@ -50,28 +54,17 @@ def load_ttm(filename):
     df.columns = df.columns.astype(str)
     return df
 
-def load_ttms(scenario_dir, user_classes):
-    ttms = {}
-    for mode in MODES:
-        routeenvs = user_classes.loc[:, f"routeenv_{mode}"].unique()
-        for routeenv in routeenvs:
-            if type(routeenv) == type("string") and routeenv != "":
-                filename = f"{scenario_dir}/routing/{routeenv}/ttm_{mode}.csv"
-                ttm = load_ttm(filename)
-                ttms[f"{routeenv}_{mode}"] = ttm
-    return ttms
-
-def load_ttms_for_userclasses(scenario_dir, user_classes):
-    ttms = load_ttms(scenario_dir, user_classes)
-
-    userclass_ttms = {}
+def load_gtms_for_userclasses(scenario_dir, user_classes):
+    gtms = {}
     for userclass in user_classes.index:
-        userclass_ttms[userclass] = {}
+        gtms[userclass] = {}
         for mode in MODES:
-            routeenv = user_classes.loc[userclass, f"routeenv_{mode}"]
-            if type(routeenv) == type("string") and routeenv != "":
-                userclass_ttms[userclass][mode] = ttms[f"{routeenv}_{mode}"]
-    return userclass_ttms
+            filename = f"{scenario_dir}/impedances/{userclass}/gtm_{mode}.csv"
+            if os.path.exists(filename):
+                print("loading", filename)
+                gtm = load_gtm(filename)
+                gtms[userclass][mode] = gtm
+    return gtms
 
 def get_population_by_geom_and_userclass(geometry_and_dests, userclass_statistics):
     population_by_geom_and_userclass = geometry_and_dests.drop(
@@ -96,7 +89,7 @@ def get_population_by_geom_and_userclass(geometry_and_dests, userclass_statistic
 
     return population_by_geom_and_userclass
 
-def choose_modes_for_userclasses(userclass_ttms):
+def choose_modes_for_userclasses(userclass_gtms):
     """
     input: a dictionary of impedance matrices by mode, indexed by mode name
     returns two dataframes: lowest_values and mode_selections
@@ -106,9 +99,10 @@ def choose_modes_for_userclasses(userclass_ttms):
     """
     lowest_traveltimes_by_userclass = {}
     mode_selections_by_userclass = {}
-    for userclass in userclass_ttms.keys():
-        impedance_matrices_by_mode = userclass_ttms[userclass]
+    for userclass in userclass_gtms.keys():
+        impedance_matrices_by_mode = userclass_gtms[userclass]
         if not impedance_matrices_by_mode:
+            import pdb; pdb.set_trace()
             raise ValueError("Input dictionary cannot be empty")
 
         # Initialize with first mode's values
@@ -165,7 +159,7 @@ def evaluate_for_userclasses(lowest_traveltimes_by_userclass, geometry_and_dests
 
 
 def get_userclass_results(scenario_dir,
-                          userclass_ttms,
+                          userclass_gtms,
                           value_sum_total_by_OD_by_userclass,
                           population_by_geom_and_userclass,
                           mode_selections_by_userclass):
@@ -173,10 +167,10 @@ def get_userclass_results(scenario_dir,
     result_categories += [f"percent_from_{mode}" for mode in MODES]
     result_categories += [f"value_from_{mode}" for mode in MODES]
 
-    results_by_userclass = pd.DataFrame(index=list(userclass_ttms.keys()),
+    results_by_userclass = pd.DataFrame(index=list(userclass_gtms.keys()),
                                         columns=result_categories)
     print("summarizing results by userclass")
-    for userclass in tqdm(list(userclass_ttms.keys())):
+    for userclass in tqdm(list(userclass_gtms.keys())):
         mode_selections = mode_selections_by_userclass[userclass]
         value_sum_total_by_OD = value_sum_total_by_OD_by_userclass[userclass]
         pop_by_geom = population_by_geom_and_userclass[userclass]
@@ -201,8 +195,8 @@ def get_userclass_results(scenario_dir,
     return results_by_userclass
 
 
-def get_geometry_results(scenario_dir,
-                         userclass_ttms,
+def get_geometry_results_with_viz(scenario_dir,
+                         userclass_gtms,
                          geometry_and_dests,
                          value_sum_total_by_OD_by_userclass,
                          population_by_geom_and_userclass,
@@ -213,6 +207,14 @@ def get_geometry_results(scenario_dir,
 
     results_by_geometry = gpd.GeoDataFrame(index=list(geometry_and_dests.geom_id),
                                            columns=result_categories)
+
+    by_geom_and_userclass = {}
+    for userclass in userclass_gtms.keys():
+        by_geom_and_userclass[userclass] = gpd.GeoDataFrame(
+            index=list(geometry_and_dests.geom_id),
+            columns=result_categories)
+
+
     print("summarizing results by geometry")
     for geom_id in tqdm(list(results_by_geometry.index)):
         results_by_geometry.loc[geom_id, 'geometry'] = geometry_and_dests.loc[geom_id, 'geometry']
@@ -221,23 +223,37 @@ def get_geometry_results(scenario_dir,
         mode_value_tallies = {}
         for mode in MODES:
             mode_value_tallies[mode] = 0
-        for userclass in userclass_ttms.keys():
+        for userclass in userclass_gtms.keys():
+            by_geom_and_userclass[userclass].loc[geom_id, 'geometry'] = geometry_and_dests.loc[geom_id, 'geometry']
+
+
             values_by_OD = value_sum_total_by_OD_by_userclass[userclass]
             mode_selections = mode_selections_by_userclass[userclass]
             population = population_by_geom_and_userclass.loc[geom_id, userclass]
 
-            total_value_tally += values_by_OD.loc[geom_id, :].sum()
+            value_of_geom_and_userclass = values_by_OD.loc[geom_id, :].sum()
+            total_value_tally += value_of_geom_and_userclass
+            by_geom_and_userclass[userclass].loc[geom_id, 'total_value'] = value_of_geom_and_userclass
             total_population += population
+            by_geom_and_userclass[userclass].loc[geom_id, 'population'] = population
+            by_geom_and_userclass[userclass].loc[
+                geom_id, 'per_capita'] = value_of_geom_and_userclass / population if population > 0 else np.nan
 
             for mode in MODES:
                 mask = mode_selections != mode
-                mode_value_tallies[mode] += values_by_OD.mask(mask).loc[geom_id, :].sum()
+                val_from_mode = values_by_OD.mask(mask).loc[geom_id, :].sum()
+                mode_value_tallies[mode] += val_from_mode
+                by_geom_and_userclass[userclass].loc[geom_id, f"value_from_{mode}"] = val_from_mode
+                by_geom_and_userclass[userclass].loc[
+                    geom_id, f"percent_from_{mode}"] = val_from_mode / value_of_geom_and_userclass if value_of_geom_and_userclass > 0 else np.nan
         results_by_geometry.loc[geom_id, 'total_value'] = total_value_tally
         results_by_geometry.loc[geom_id, 'total_pop'] = total_population
-        results_by_geometry.loc[geom_id, 'per_capita'] = total_value_tally / total_population
+        results_by_geometry.loc[
+            geom_id, 'per_capita'] = total_value_tally / total_population if total_population > 0 else np.nan
 
         for mode in MODES:
-            results_by_geometry.loc[geom_id, f"percent_from_{mode}"] = mode_value_tallies[mode] / total_value_tally
+            results_by_geometry.loc[geom_id, f"percent_from_{mode}"] = mode_value_tallies[
+                                                                           mode] / total_value_tally if total_value_tally > 0 else np.nan
             results_by_geometry.loc[geom_id, f"value_from_{mode}"] = mode_value_tallies[mode]
     
     # Ensure all numeric columns are proper numeric types before saving
@@ -247,14 +263,30 @@ def get_geometry_results(scenario_dir,
     
     results_by_geometry.crs = geometry_and_dests.crs
     results_by_geometry.to_file(f"{scenario_dir}/results/geometry_results.gpkg", driver="GPKG")
+
+    communication.make_radio_choropleth_map(
+        scenario_dir=scenario_dir,
+        in_data=results_by_geometry,
+        outfile="results/geometry_results.html"
+    )
+
+    os.makedirs(f"{scenario_dir}/results/by_userclass/", exist_ok=True)
+    for userclass in userclass_gtms.keys():
+        by_geom_and_userclass[userclass].to_file(f"{scenario_dir}/results/by_userclass/results_{userclass}.gpkg", driver="GPKG")
+        communication.make_radio_choropleth_map(
+            scenario_dir=scenario_dir,
+            in_data=by_geom_and_userclass[userclass],
+            outfile=f"results/by_userclass/results_{userclass}.html"
+        )
+
     return results_by_geometry
 
 
 def evaluate_scenario(scenario_dir, user_classes, userclass_statistics, geometry_and_dests):
     os.makedirs(f"{scenario_dir}/results", exist_ok=True)
 
-    #load the ttms organized by userclass
-    userclass_ttms = load_ttms_for_userclasses(scenario_dir, user_classes)
+    #load the gtms organized by userclass
+    userclass_gtms = load_gtms_for_userclasses(scenario_dir, user_classes)
 
     #get population by geom_id and userclass
     population_by_geom_and_userclass = get_population_by_geom_and_userclass(geometry_and_dests, userclass_statistics)
@@ -263,7 +295,7 @@ def evaluate_scenario(scenario_dir, user_classes, userclass_statistics, geometry
     (
         lowest_traveltimes_by_userclass,
         mode_selections_by_userclass
-    ) = choose_modes_for_userclasses(userclass_ttms)
+    ) = choose_modes_for_userclasses(userclass_gtms)
 
     # get values for each userclass
     (
@@ -276,12 +308,12 @@ def evaluate_scenario(scenario_dir, user_classes, userclass_statistics, geometry
 
     # we've done all the calculations! Now sum by userclass and geometry:
     results_by_userclass = get_userclass_results(scenario_dir,
-                                                  userclass_ttms,
+                                                  userclass_gtms,
                                                   value_sum_total_by_OD_by_userclass,
                                                   population_by_geom_and_userclass,
                                                   mode_selections_by_userclass)
-    results_by_geometry = get_geometry_results(scenario_dir,
-                                                 userclass_ttms,
+    results_by_geometry = get_geometry_results_with_viz(scenario_dir,
+                                                 userclass_gtms,
                                                  geometry_and_dests,
                                                  value_sum_total_by_OD_by_userclass,
                                                  population_by_geom_and_userclass,

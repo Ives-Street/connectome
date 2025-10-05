@@ -143,7 +143,7 @@ def _coerce_and_prettify_numeric_columns(gdf: gpd.GeoDataFrame,
             if max_abs_value > 100:
                 scale_factor = 1
                 suffix = ""
-                decimals = 0
+                decimals = 1
             else:
                 scale_factor = 1
                 suffix = ""
@@ -189,7 +189,7 @@ def make_radio_choropleth_map(
         initial: str | None = None,
         tiles: str = "CartoDB positron",
         tooltip_precision: int | None = None,
-        exclude: list = ['index'],
+        exclude: list = [],
 ) -> folium.Map:
     """
     Build a Folium map where the user can choose exactly one numeric column
@@ -209,7 +209,7 @@ def make_radio_choropleth_map(
     tooltip_precision : int | None
         If set, round numeric values in tooltip to this many decimals.
     exclude : list
-        List of column names to exclude from processing (default: ['index']).
+        List of column names to exclude from processing (default: []).
     """
     # Load GeoDataFrame if file path provided
     if isinstance(in_data, str):

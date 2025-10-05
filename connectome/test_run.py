@@ -11,7 +11,7 @@ if not os.path.exists('setup'):
     os.chdir('connectome/')
 
 
-from setup.define_analysis_areas import usa_tracts_from_address
+from setup.define_analysis_areas import get_usa_tracts_from_address
 from setup.populate_people_usa import (
     create_userclasses, create_userclass_statistics)
 from setup.populate_destinations import populate_all_dests_USA, populate_destinations_overture_places
@@ -19,7 +19,7 @@ from setup.physical_conditions import (
     download_osm, make_osm_editable, get_GTFS_from_mobility_database
 )
 from setup.define_valuations import generalize_destination_units
-from routing import route_for_all_envs
+from routing_and_impedance import route_for_all_envs
 from representation import apply_experience_defintions
 from evaluation import evaluate_scenario
 
@@ -54,10 +54,10 @@ import communication
 # states = ["VT"]
 # address = "26 University Pl, Burlington, VT 05405"
 # buffer = 3000
-run_name = "pgh_test"
-states = ["PA"]
-address = "210 Forbes Ave, Pittsburgh, PA 15222"
-buffer = 10000
+run_name = "pvd_test"
+states = ["RI", "MA"]
+address = "252 Ives Street, Providence RI, 02906"
+buffer = 15000
 
 
 
@@ -71,9 +71,9 @@ input_dir = f'{run_name}/existing_conditions/input_data'
 if not os.path.exists(f"{input_dir}/analysis_geometry.gpkg"):
     print(f"fetching census tracts from {states} for {address} with buffer {buffer}m")
 
-    study_area_tracts = usa_tracts_from_address(
-        states,
-        address,
+    study_area_tracts = get_usa_tracts_from_address(
+        states=states,
+        address=address,
         buffer=buffer,
         save_to = f"{input_dir}/analysis_geometry.gpkg"
     )
@@ -111,10 +111,10 @@ else:
 if not os.path.exists(f"{input_dir}/destination_statistics.gpkg"):
     print("populating overture destinations")
     study_area_tracts_with_dests = populate_all_dests_USA(
-        study_area_tracts,
-        states[0],
-        True,
-        save_to=f"{input_dir}/destination_statistics.gpkg"
+        geographies = study_area_tracts,
+        states = states,
+        already_tracts = True,
+        save_to = f"{input_dir}/destination_statistics.gpkg"
     )
 else:
     print("loading destinations from disk")
@@ -156,18 +156,24 @@ else:
     user_classes_w_routeenvs.index = user_classes_w_routeenvs.user_class_id.values
     user_classes_w_routeenvs.fillna("", inplace=True)
 
-if not os.path.exists(f"{scenario_dir}/routing/universal_re/ttm_WALK.csv"):
+if not os.path.exists(f"{scenario_dir}/impedances"):
     print("routing")
-    route_for_all_envs(f"{scenario_dir}/routing",
+    route_for_all_envs(f"{scenario_dir}",
                        study_area_tracts_with_dests,
                        user_classes_w_routeenvs
                        )
 else:
     print("routing already done. skipping.")
 
+#structure ttms and create cost, hassle matrices
+
 if not os.path.exists(f"{scenario_dir}/results/geometry_results.geojson"):
     print("evaluating")
     evaluate_scenario(scenario_dir, user_classes_w_routeenvs, userclass_statistics, study_area_tracts_with_dests)
-    communication.visualize_results_by_geometry(scenario_dir)
+    communication.make_radio_choropleth_map(
+        scenario_dir=scenario_dir,
+        in_data="results/geometry_results.gpkg",
+        outfile="results/geometry_results.html"
+    )
 else:
     print("scenario has already been run")
