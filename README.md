@@ -1,5 +1,11 @@
 # Connectome
 
+### License
+
+Connectome is NOT FREE FOR COMMERCIAL USE. If you wish to use Connectome for a commercial purpose, you MUST contact dtr@ives.st for a licesne or you will be legally responsible. Commercial purposes include any activity by a for-profit entity, such as consulting services, real estate investment analysis, or the planning of private transportation services. 
+
+Connectome is freely available for NON-COMMERCIAL USE ONLY. It is free for use by governments, nonprofits, academic groups, and individual researchers. As such, the codebase is available here as a "source-available" rather than a true "open-source" license.
+
 ### About
 
 The connectome model is a tool to measure general access-to-destinations in an urban area. By "general" access-to-destinations, we mean that the connectome tool includes all modes, all places, and all people. Most conventional approaches to access-to-destiations used in transportation planning practice are "specific", meaning that they only measure access to a specific set of destinations (often jobs) by a specific mode (often public transport). Because the connectome approach is general, we hope it will be more useful for evaluating transport interventions, such as road pricing or road space reallocations, that affect multiple different modes of transport. This approach may have applications for high-level evaluations of proposed transportation investments, or as a supplement to conventional travel demand models.
