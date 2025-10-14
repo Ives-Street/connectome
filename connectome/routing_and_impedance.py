@@ -56,6 +56,9 @@ def route_environment(routeenv, mode, scenario_dir, rep_points, departure_time):
                                 )
     ttm_df = pd.DataFrame(ttm)  # shouldn't be necessary, but I was getting a weird r5py error
 
+    if ttm_df.isnull().any().any():
+        print(f"Error calculating network for {routeenv}: travel time matrix contains empty values")
+
     # Ensure ids are strings for consistent indexing/column matching
     ttm_df["from_id"] = ttm_df["from_id"].astype(str)
     ttm_df["to_id"] = ttm_df["to_id"].astype(str)
@@ -106,13 +109,15 @@ def route_for_all_envs(scenario_dir: str,
         for routeenv in route_envs_for_mode:
             user_class_selection = user_classes[user_classes[f'routeenv_{mode}'] == routeenv]
             ttm = route_environment(routeenv, mode, scenario_dir, rep_points, departure_time)
+            post_process_matrices(scenario_dir, ttm, mode, user_class_selection, geoms_with_dests) #this also saves the files
             if visualize_all:
                 geoms_with_dests.index = geoms_with_dests['geom_id'].values
-                communication.visualize_access_to_zone(geoms_with_dests,
+                communication.visualize_access_to_zone(scenario_dir,
+                                                       geoms_with_dests,
+                                                       f"routing/{routeenv}/route_{mode}_traveltime_viz.html",
                                                        ttm,
                                                        target_zone_id=None,
-                                                       out_path=f"{scenario_dir}/routing/{routeenv}/route_{mode}_traveltime_viz.html")
-            post_process_matrices(scenario_dir, ttm, mode, user_class_selection, geoms_with_dests) #this also saves the files
+                                                       )
 
 ###
 # helper functions for impedance calculations
@@ -121,6 +126,7 @@ def route_for_all_envs(scenario_dir: str,
 def parking_cost(ttm, geoms_with_dests):
     tcm = ttm.copy()
     tcm.loc[:,:] = 0
+    # PROVIDENCE/RI SPECIFIC
     # Making some assumptions based on Parkopedia
     mid_price_dests = geoms_with_dests[(geoms_with_dests['lodes_jobs_per_sqkm'] > 7000) &
                                        (geoms_with_dests['lodes_jobs_per_sqkm'] < 12000)

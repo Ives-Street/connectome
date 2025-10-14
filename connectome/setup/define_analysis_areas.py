@@ -196,7 +196,10 @@ def _filter_tracts_by_geometry(tracts: gpd.GeoDataFrame, filter_geom: gpd.GeoDat
     return intersecting
 
 
-def _process_tracts(tracts: gpd.GeoDataFrame, save_to: str = "") -> gpd.GeoDataFrame:
+def _process_tracts(tracts: gpd.GeoDataFrame,
+                    water_threshold = DEFAULT_WATER_THRESHOLD,
+                    year = 2022,
+                    save_to: str = "") -> gpd.GeoDataFrame:
     """Process tracts: add IDs, remove water, and save.
     
     Args:

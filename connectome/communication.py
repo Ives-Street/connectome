@@ -8,12 +8,22 @@ from branca.colormap import linear
 from folium.features import GeoJson, GeoJsonTooltip
 from folium.elements import MacroElement
 from jinja2 import Template
+import folium.plugins
 
+MODES = [ #todo - make this universal for the whole codebase
+    "CAR",
+    "TRANSIT",
+    "WALK",
+    "BICYCLE",
+    "RIDEHAIL",
+]
 
-def visualize_access_to_zone(geoms_with_dests,
+def visualize_access_to_zone(scenario_dir,
+                             geoms_with_dests,
+                             outpath,
                              ttm,
                              target_zone_id = None,
-                             out_path = "communication/access_to_zone.html"):
+                             ):
     """Visualize access to a specific zone or to the zone with most destinations.
     The target zone will be highlighted in red on the map.
 
@@ -60,24 +70,16 @@ def visualize_access_to_zone(geoms_with_dests,
     # Keep only the necessary columns
     to_visualize = to_visualize[['geom_id', 'geometry', 'travel_time_to_dest']]
 
-    def style_function(feature):
-        # Highlight the target zone in blue
-        if str(feature['properties']['geom_id']) == target_zone_id:
-            return {'fillColor': 'blue', 'color': 'blue', 'weight': 2}
-        return {}
-
-    m = to_visualize.explore(
-        column="travel_time_to_dest",
-        cmap="YlOrBr",
+    make_radio_choropleth_map(
+        scenario_dir=scenario_dir,
+        in_data=to_visualize,
+        outfile=outpath,
         tiles="CartoDB.Positron",
-        legend=True,
-        legend_kwds={"caption": "Travel Time to Selected Destination (minutes)"},
-        style_kwds={"style_function":style_function}
+        tooltip_precision=0,
     )
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    m.save(out_path)
+
     print(
-        f"Saved visualization of access to zone {target_zone_id} to {out_path}"
+        f"Saved visualization of access to zone {target_zone_id} to {outpath}"
     )
 
 
@@ -180,12 +182,12 @@ def _coerce_and_prettify_numeric_columns(gdf: gpd.GeoDataFrame,
 
     return gdf, column_mapping
 
-
+#
 def make_radio_choropleth_map(
         scenario_dir: str,
         in_data: gpd.GeoDataFrame | str,
         outfile: str | None = None,
-        numeric_columns: list[str] | None = None,
+        columns_to_viz: list[str] | None = None,
         initial: str | None = None,
         tiles: str = "CartoDB positron",
         tooltip_precision: int | None = None,
@@ -194,7 +196,7 @@ def make_radio_choropleth_map(
     """
     Build a Folium map where the user can choose exactly one numeric column
     (via radio buttons) to color the layer. The basemap never changes, and
-    exactly one legend is shown at any time.
+    exactly one legend is shown at any time. Includes a north arrow and scale bar.
 
     Parameters
     ----------
@@ -228,23 +230,57 @@ def make_radio_choropleth_map(
     # 1) Coerce all possible columns to float
     gdf, column_mapping = _coerce_and_prettify_numeric_columns(gdf, exclude_cols=exclude)
 
+    if columns_to_viz is not None:
+        columns_to_viz =[column_mapping[x] for x in columns_to_viz]
+
     # 2) Determine numeric columns
     auto_numeric = [c for c in gdf.columns if c != gdf.geometry.name and pd.api.types.is_numeric_dtype(gdf[c])]
-    if numeric_columns is None:
+    if columns_to_viz is None or columns_to_viz == []:
         numeric_columns = auto_numeric
     else:
         # keep only those that are actually numeric after coercion
-        numeric_columns = [c for c in numeric_columns if c in auto_numeric]
+        numeric_columns = [c for c in columns_to_viz if c in auto_numeric]
 
     if not numeric_columns:
-        raise ValueError("No numeric columns available to visualize after coercion.")
+        print("No numeric columns available to visualize after coercion. Defaulting to all columns.")
+        #TODO fix error with determining these columns AFTER renaming columns above
+        numeric_columns = auto_numeric
 
     # 3) Build the base map (basemap never changes)
     # Center on the data bounds
     bounds = gdf.total_bounds  # (minx, miny, maxx, maxy)
     cx = (bounds[1] + bounds[3]) / 2
     cy = (bounds[0] + bounds[2]) / 2
-    m = folium.Map(location=[cx, cy], zoom_start=12, tiles=tiles, control_scale=True)
+    m = folium.Map(location=[cx, cy], zoom_start=12, tiles=tiles)
+
+    # Add scale bar with double size
+    scale = folium.plugins.MeasureControl(position='bottomleft', primary_length_unit='meters',
+                                          secondary_length_unit='miles')
+    scale.add_to(m)
+
+    # Add north arrow
+    north_arrow = MacroElement()
+    north_arrow._name = "north_arrow"
+
+    # Create the HTML/CSS for the north arrow
+    north_arrow.template = Template("""
+        {% macro script(this, kwargs) %}
+        var north_arrow = L.control({position: 'topleft'});
+        north_arrow.onAdd = function(map) {
+            var div = L.DomUtil.create('div', 'info north-arrow');
+            div.innerHTML = '<div style="transform: rotate(0deg); font-size: 24px;">⬆</div>';
+            div.style.backgroundColor = 'rgba(255, 255, 255, 0.8)';
+            div.style.padding = '6px 8px';
+            div.style.border = '2px solid rgba(0,0,0,0.2)';
+            div.style.borderRadius = '4px';
+            div.style.margin = '10px';
+            return div;
+        };
+        north_arrow.addTo({{this._parent.get_name()}});
+        {% endmacro %}
+    """)
+
+    m.add_child(north_arrow)
 
     # We’ll add all data layers now, one per numeric column, and show/hide them via JS radios.
     layer_js_names = {}      # {col: <folium internal JS var name>}
@@ -334,8 +370,6 @@ def make_radio_choropleth_map(
         initial = numeric_columns[0]
 
     # Inject our radio UI and the show/hide logic + legend switching
-    from folium.elements import MacroElement
-    from jinja2 import Template
 
     class _RadioController(MacroElement):
         _template = Template("""
@@ -401,16 +435,39 @@ def make_radio_choropleth_map(
           };
           radioCtl.addTo(map);
 
+          // Add title
+          var titleDiv = L.control({position: 'topcenter'});
+          titleDiv.onAdd = function() {
+            var div = L.DomUtil.create('div');
+            div.style.background = 'white';
+            div.style.padding = '8px 10px';
+            div.style.borderRadius = '6px';
+            div.style.boxShadow = '0 1px 4px rgba(0,0,0,0.3)';
+            div.id = 'map-title';
+            return div;
+          };
+          titleDiv.addTo(map);
+
+          // Update title function
+          function updateTitle(metric) {
+            var titleElement = document.getElementById('map-title');
+            titleElement.innerHTML = `<h3 style="margin:0">${metric}</h3>`;
+          }
+
           // Wire up change
           var radios = document.getElementsByName('metric-radio');
           [].forEach.call(radios, function(r) {
             r.addEventListener('change', function(ev) {
-              if (ev.target.checked) showOnly(ev.target.value);
+              if (ev.target.checked) {
+                showOnly(ev.target.value);
+                updateTitle(ev.target.value);
+              }
             });
           });
 
-          // Activate initial
+          // Activate initial and set initial title
           showOnly("{{ this.initial }}");
+          updateTitle("{{ this.initial }}");
         })();
         {% endmacro %}
         """)
@@ -446,3 +503,278 @@ def make_radio_choropleth_map(
 
     return m
 
+
+# ... existing code ...
+
+def compare_scenarios(
+        study_dir: str,
+        scenario1_name: str = "Scenario 1",
+        scenario2_name: str = "Scenario 2",
+        output_dir: str = None,
+) -> tuple[pd.DataFrame, gpd.GeoDataFrame]:
+    """
+    Compare results between two scenarios.
+
+    Loads results from both scenarios, calculates differences and percent changes,
+    prints key summary statistics, and creates detailed comparison files and maps.
+
+    Args:
+        scenario1_dir: Path to first scenario directory (baseline)
+        scenario2_dir: Path to second scenario directory (alternative)
+        scenario1_name: Display name for scenario 1
+        scenario2_name: Display name for scenario 2
+        output_dir: Optional directory to save comparison results (defaults to scenario2_dir/comparison)
+
+    Returns:
+        tuple of (userclass_comparison_df, geometry_comparison_gdf)
+    """
+
+    scenario1_dir = os.path.join(study_dir, scenario1_name)
+    scenario2_dir = os.path.join(study_dir, scenario2_name)
+
+    # Set default output directory
+    if output_dir is None:
+        output_dir = os.path.join(scenario2_dir, "comparison")
+    os.makedirs(output_dir, exist_ok=True)
+
+    print(f"\n{'=' * 60}")
+    print(f"SCENARIO COMPARISON")
+    print(f"Baseline: {scenario1_name}")
+    print(f"Alternative: {scenario2_name}")
+    print(f"{'=' * 60}\n")
+
+    # ========================================================================
+    # Load userclass results
+    # ========================================================================
+    print("Loading userclass results...")
+    uc1 = pd.read_csv(os.path.join(scenario1_dir, "results", "userclass_results.csv"), index_col=0)
+    uc2 = pd.read_csv(os.path.join(scenario2_dir, "results", "userclass_results.csv"), index_col=0)
+
+    # Calculate differences
+    uc_comparison = pd.DataFrame(index=uc1.index)
+
+    # Copy scenario 1 values
+    for col in uc1.columns:
+        uc_comparison[f"{scenario1_name}_{col}"] = uc1[col]
+
+    # Copy scenario 2 values
+    for col in uc2.columns:
+        uc_comparison[f"{scenario2_name}_{col}"] = uc2[col]
+
+    # Calculate absolute and percent differences for key metrics
+    uc_comparison["total_value_diff"] = uc2["total_value"] - uc1["total_value"]
+    uc_comparison["total_value_pct_change"] = (
+            (uc2["total_value"] - uc1["total_value"]) / uc1["total_value"] * 100
+    )
+
+    uc_comparison["per_capita_diff"] = uc2["per_capita"] - uc1["per_capita"]
+    uc_comparison["per_capita_pct_change"] = (
+            (uc2["per_capita"] - uc1["per_capita"]) / uc1["per_capita"] * 100
+    )
+
+    # Mode share differences (percentage points)
+    for mode in MODES:
+        col = f"percent_from_{mode}"
+        if col in uc1.columns and col in uc2.columns:
+            uc_comparison[f"{mode}_share_diff_pp"] = (uc2[col] - uc1[col]) * 100  # percentage points
+
+    # Save userclass comparison
+    uc_comparison.to_csv(os.path.join(output_dir, "userclass_comparison.csv"))
+
+    # ========================================================================
+    # Print overall summary statistics
+    # ========================================================================
+    total_value_1 = uc1["total_value"].sum()
+    total_value_2 = uc2["total_value"].sum()
+    total_value_diff = total_value_2 - total_value_1
+    total_value_pct_change = (total_value_diff / total_value_1) * 100
+
+    total_pop_1 = uc1["total_pop"].sum()
+    total_pop_2 = uc2["total_pop"].sum()
+
+    per_capita_1 = total_value_1 / total_pop_1
+    per_capita_2 = total_value_2 / total_pop_2
+    per_capita_diff = per_capita_2 - per_capita_1
+    per_capita_pct_change = (per_capita_diff / per_capita_1) * 100
+
+    print(f"\n{'=' * 60}")
+    print(f"OVERALL SUMMARY")
+    print(f"{'=' * 60}")
+    print(f"\nTotal Accessibility Value:")
+    print(f"  {scenario1_name}: {total_value_1:,.0f}")
+    print(f"  {scenario2_name}: {total_value_2:,.0f}")
+    print(f"  Difference: {total_value_diff:,.0f} ({total_value_pct_change:+.2f}%)")
+
+    print(f"\nPer Capita Accessibility:")
+    print(f"  {scenario1_name}: {per_capita_1:,.2f}")
+    print(f"  {scenario2_name}: {per_capita_2:,.2f}")
+    print(f"  Difference: {per_capita_diff:,.2f} ({per_capita_pct_change:+.2f}%)")
+
+    # Mode shares
+    print(f"\n{'=' * 60}")
+    print(f"OVERALL MODE SHARES")
+    print(f"{'=' * 60}")
+    for mode in MODES:
+        col = f"value_from_{mode}"
+        if col in uc1.columns and col in uc2.columns:
+            mode_value_1 = uc1[col].sum()
+            mode_value_2 = uc2[col].sum()
+            mode_share_1 = (mode_value_1 / total_value_1) * 100
+            mode_share_2 = (mode_value_2 / total_value_2) * 100
+            mode_share_diff = mode_share_2 - mode_share_1
+
+            print(f"\n{mode}:")
+            print(f"  {scenario1_name}: {mode_share_1:.2f}%")
+            print(f"  {scenario2_name}: {mode_share_2:.2f}%")
+            print(f"  Difference: {mode_share_diff:+.2f} percentage points")
+
+    # ========================================================================
+    # Load geometry results
+    # ========================================================================
+    print(f"\n{'=' * 60}")
+    print("Loading geometry results...")
+    geom1 = gpd.read_file(os.path.join(scenario1_dir, "results", "geometry_results.gpkg"))
+    geom2 = gpd.read_file(os.path.join(scenario2_dir, "results", "geometry_results.gpkg"))
+
+    # Ensure same index
+    geom1 = geom1.set_index(geom1.index.astype(str))
+    geom2 = geom2.set_index(geom2.index.astype(str))
+
+    # Create comparison GeoDataFrame
+    geom_comparison = geom1[['geometry']].copy()
+
+    # Add scenario values
+    for col in ['total_value', 'per_capita', 'total_pop']:
+        if col in geom1.columns:
+            geom_comparison[f"{scenario1_name}_{col}"] = geom1[col]
+            geom_comparison[f"{scenario2_name}_{col}"] = geom2[col]
+
+    # Calculate differences
+    geom_comparison["total_value_diff"] = geom2["total_value"] - geom1["total_value"]
+    geom_comparison["total_value_pct_change"] = (
+            (geom2["total_value"] - geom1["total_value"]) / geom1["total_value"].replace(0, np.nan) * 100
+    )
+
+    geom_comparison["per_capita_diff"] = geom2["per_capita"] - geom1["per_capita"]
+    geom_comparison["per_capita_pct_change"] = (
+            (geom2["per_capita"] - geom1["per_capita"]) / geom1["per_capita"].replace(0, np.nan) * 100
+    )
+
+    # Mode share differences
+    for mode in MODES:
+        col = f"percent_from_{mode}"
+        if col in geom1.columns and col in geom2.columns:
+            geom_comparison[f"{mode}_share_diff_pp"] = (geom2[col] - geom1[col]) * 100
+            geom_comparison[f"{scenario1_name}_{col}"] = geom1[col] * 100
+            geom_comparison[f"{scenario2_name}_{col}"] = geom2[col] * 100
+
+    # Save geometry comparison
+    geom_comparison.to_file(os.path.join(output_dir, "geometry_comparison.gpkg"), driver="GPKG")
+
+    # ========================================================================
+    # Create visualization maps
+    # ========================================================================
+    print("\nCreating comparison visualizations...")
+
+    # Map 1: Value changes
+    value_cols = [
+        "total_value_diff",
+        "total_value_pct_change",
+        "per_capita_diff",
+        "per_capita_pct_change",
+    ]
+    value_cols = [c for c in value_cols if c in geom_comparison.columns]
+
+    make_radio_choropleth_map(
+        scenario_dir=output_dir,
+        in_data=geom_comparison,
+        outfile="value_comparison_map.html",
+        columns_to_viz=value_cols,
+        initial="per_capita_pct_change",
+    )
+
+    # Map 2: Mode share changes
+    mode_share_cols = []
+    for mode in MODES:
+        col = f"{mode}_share_diff_pp"
+        if col in geom_comparison.columns:
+            mode_share_cols.append(col)
+
+    if mode_share_cols:
+        make_radio_choropleth_map(
+            scenario_dir=output_dir,
+            in_data=geom_comparison,
+            outfile="mode_share_comparison_map.html",
+            columns_to_viz=mode_share_cols,
+            initial=mode_share_cols[0],
+        )
+
+    # ========================================================================
+    # Print geographic summary
+    # ========================================================================
+    print(f"\n{'=' * 60}")
+    print(f"GEOGRAPHIC DISTRIBUTION")
+    print(f"{'=' * 60}")
+
+    # Areas with biggest gains/losses
+    top_gainers = geom_comparison.nlargest(5, "per_capita_pct_change")
+    top_losers = geom_comparison.nsmallest(5, "per_capita_pct_change")
+
+    print(f"\nTop 5 areas with largest per-capita gains:")
+    for idx in top_gainers.index:
+        val = top_gainers.loc[idx, "per_capita_pct_change"]
+        print(f"  Zone {idx}: {val:+.2f}%")
+
+    print(f"\nTop 5 areas with largest per-capita losses:")
+    for idx in top_losers.index:
+        val = top_losers.loc[idx, "per_capita_pct_change"]
+        print(f"  Zone {idx}: {val:+.2f}%")
+
+    # ========================================================================
+    # Summary file
+    # ========================================================================
+    with open(os.path.join(output_dir, "comparison_summary.txt"), "w") as f:
+        f.write(f"SCENARIO COMPARISON SUMMARY\n")
+        f.write(f"={'-'*60}\n\n")
+        f.write(f"Baseline: {scenario1_name}\n")
+        f.write(f"Alternative: {scenario2_name}\n\n")
+
+        f.write(f"OVERALL RESULTS\n")
+        f.write(f"{'-' * 60}\n")
+        f.write(f"Total Accessibility Value:\n")
+        f.write(f"  {scenario1_name}: {total_value_1:,.0f}\n")
+        f.write(f"  {scenario2_name}: {total_value_2:,.0f}\n")
+        f.write(f"  Difference: {total_value_diff:,.0f} ({total_value_pct_change:+.2f}%)\n\n")
+
+        f.write(f"Per Capita Accessibility:\n")
+        f.write(f"  {scenario1_name}: {per_capita_1:,.2f}\n")
+        f.write(f"  {scenario2_name}: {per_capita_2:,.2f}\n")
+        f.write(f"  Difference: {per_capita_diff:,.2f} ({per_capita_pct_change:+.2f}%)\n\n")
+
+        f.write(f"MODE SHARES\n")
+        f.write(f"{'-' * 60}\n")
+        for mode in MODES:
+            col = f"value_from_{mode}"
+            if col in uc1.columns and col in uc2.columns:
+                mode_value_1 = uc1[col].sum()
+                mode_value_2 = uc2[col].sum()
+                mode_share_1 = (mode_value_1 / total_value_1) * 100
+                mode_share_2 = (mode_value_2 / total_value_2) * 100
+                mode_share_diff = mode_share_2 - mode_share_1
+
+                f.write(f"\n{mode}:\n")
+                f.write(f"  {scenario1_name}: {mode_share_1:.2f}%\n")
+                f.write(f"  {scenario2_name}: {mode_share_2:.2f}%\n")
+                f.write(f"  Difference: {mode_share_diff:+.2f} percentage points\n")
+
+        print(f"\n{'=' * 60}")
+        print(f"Comparison complete!")
+        print(f"Results saved to: {output_dir}")
+        print(f"  - userclass_comparison.csv")
+        print(f"  - geometry_comparison.gpkg")
+        print(f"  - value_comparison_map.html")
+        print(f"  - mode_share_comparison_map.html")
+        print(f"  - comparison_summary.txt")
+        print(f"{'=' * 60}\n")
+
+    return uc_comparison, geom_comparison

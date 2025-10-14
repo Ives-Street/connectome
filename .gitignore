@@ -1,5 +1,9 @@
 #files for access tool:
 sc*/
+testing/
+testing/*
+.idea/
+.idea/*
 prep*/
 pop_points.csv
 *.geojson

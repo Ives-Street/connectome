@@ -7,6 +7,7 @@ import requests
 import shapely.geometry
 import geopandas as gpd
 from mobility_db_api import MobilityAPI
+from pyrosm import OSM
 
 import zipfile
 import tempfile
@@ -17,9 +18,10 @@ os.environ['MOBILITY_API_REFRESH_TOKEN'] = open("mobility_db_refresh_token.txt")
 
 def download_osm(geometry: gpd.GeoDataFrame, #unbuffered
                 save_to_unclipped: str,
+                save_to_unclipped_filtered:str,
                 save_to_clipped: str,
-                save_to_clipped_editable:str = "",
                 buffer_dist: float = 2000, #meters
+                approach = "geofabrik",
                 ):
     print('preparing OSM')
     polygon_unbuffered = geometry.union_all()
@@ -28,84 +30,118 @@ def download_osm(geometry: gpd.GeoDataFrame, #unbuffered
     geom_buffered_latlon = ox.projection.project_geometry(geom_buffered_utm, crs=utm_crs, to_latlong=True)[0]
     print(geom_buffered_latlon.bounds)
     minx, miny, maxx, maxy = geom_buffered_latlon.bounds
+    if approach == "pyrosm":
+        osm = OSM(save_to_unclipped)
+        custom_filter = {
+            'highway': [
+                'motorway', 'trunk', 'primary', 'secondary', 'tertiary',
+                'residential', 'living_street', 'service', 'unclassified',
+                'motorway_link', 'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link',
+                'path', 'footway', 'cycleway', 'bridleway', 'steps', 'track'
+            ]
+        }
+        network = OSM.get_network(custom_filter=custom_filter)
+        network = network[network.geometry.intersects(geom_buffered_latlon)]
+        network.to_file(save_to_clipped)
+        #TODO check that this works
 
-    if not os.path.exists(save_to_unclipped): #download from Geofabrik
-        print("attempting to download from Germany")
-        bbox_poly = shapely.geometry.box(minx, miny, maxx, maxy)
-
-        # Load Geofabrik index with geometries
-        index_url = "https://download.geofabrik.de/index-v1.json"
-        resp = requests.get(index_url)
-        resp.raise_for_status()
-        data = resp.json()
-
-        # Convert to GeoDataFrame
-        features = []
-        for feat in data["features"]:
-            poly = shapely.geometry.shape(feat["geometry"])
-            props = feat["properties"]
-            features.append({"geometry": poly, **props})
-
-        geofabrik_gdf = gpd.GeoDataFrame(features, crs="EPSG:4326")
-
-        # Filter regions that contain the bbox
-        candidates = geofabrik_gdf[geofabrik_gdf.contains(bbox_poly)]
-
-        if candidates.empty:
-            raise ValueError("No Geofabrik region fully contains the bounding box!")
-
-        # Pick the smallest by polygon area
-        smallest = candidates.iloc[candidates.area.argmin()]
-
-        region_url = smallest["urls"]["pbf"]  # direct .osm.pbf link
-        region_name = smallest["id"]
-        print(f"Selected region: {region_name}")
-        print(f"Download URL: {region_url}")
-
-        # Download the .osm.pbf file
+    if approach == "geofabrik": 
+        if not os.path.exists(save_to_unclipped): #download from Geofabrik
+            print("attempting to download from Germany")
+            bbox_poly = shapely.geometry.box(minx, miny, maxx, maxy)
+    
+            # Load Geofabrik index with geometries
+            index_url = "https://download.geofabrik.de/index-v1.json"
+            resp = requests.get(index_url)
+            resp.raise_for_status()
+            data = resp.json()
+    
+            # Convert to GeoDataFrame
+            features = []
+            for feat in data["features"]:
+                poly = shapely.geometry.shape(feat["geometry"])
+                props = feat["properties"]
+                features.append({"geometry": poly, **props})
+    
+            geofabrik_gdf = gpd.GeoDataFrame(features, crs="EPSG:4326")
+    
+            # Filter regions that contain the bbox
+            candidates = geofabrik_gdf[geofabrik_gdf.contains(bbox_poly)]
+    
+            if candidates.empty:
+                raise ValueError("No Geofabrik region fully contains the bounding box!")
+    
+            # Pick the smallest by polygon area
+            smallest = candidates.iloc[candidates.area.argmin()]
+    
+            region_url = smallest["urls"]["pbf"]  # direct .osm.pbf link
+            region_name = smallest["id"]
+            print(f"Selected region: {region_name}")
+            print(f"Download URL: {region_url}")
+    
+            # Download the .osm.pbf file
+            if not os.path.exists(save_to_unclipped):
+                print(f"Downloading {region_url} ...")
+                r = requests.get(region_url, stream=True)
+                r.raise_for_status()
+                with open(save_to_unclipped, "wb") as f:
+                    for chunk in r.iter_content(8192):
+                        f.write(chunk)
+                print(f"Saved to {save_to_unclipped}")
+    
+    #    geom_in_geojson_forosm = geojson.Feature(geometry=geom_buffered_latlon, properties={})
+    #    with open(scenario+'/boundaries_forosm.geojson', 'w') as out:
+    #        out.write(json.dumps(geom_in_geojson_forosm))
+    
         if not os.path.exists(save_to_unclipped):
-            print(f"Downloading {region_url} ...")
-            r = requests.get(region_url, stream=True)
-            r.raise_for_status()
-            with open(save_to_unclipped, "wb") as f:
-                for chunk in r.iter_content(8192):
-                    f.write(chunk)
-            print(f"Saved to {save_to_unclipped}")
+            print(f'''
+                  ERROR: No .osm.pbf file found nor autodownloaded.
+                  To measure a connectome, we need data from OpenStreetMap
+                  that covers the entire geographic analysis area.
+                  Download a .osm.pbf file from https://download.geofabrik.de/
+                  (preferably the smallest one that covers your area)
+                  And put that file in {save_to_unclipped}.
+                  ''')
+            raise ValueError
+    
+        #crop OSM
+        cmd = [
+            "osmium",
+            "tags-filter",
+            str(save_to_unclipped),
+            "w/highway",
+            "r/highway",
+            "-o", str(save_to_unclipped_filtered),
+            "--overwrite"
+        ]
 
-#    geom_in_geojson_forosm = geojson.Feature(geometry=geom_buffered_latlon, properties={})
-#    with open(scenario+'/boundaries_forosm.geojson', 'w') as out:
-#        out.write(json.dumps(geom_in_geojson_forosm))
-
-    if not os.path.exists(save_to_unclipped):
-        print(f'''
-              ERROR: No .osm.pbf file found nor autodownloaded.
-              To measure a connectome, we need data from OpenStreetMap
-              that covers the entire geographic analysis area.
-              Download a .osm.pbf file from https://download.geofabrik.de/
-              (preferably the smallest one that covers your area)
-              And put that file in {save_to_unclipped}.
-              ''')
-        raise ValueError
-
-    #crop OSM
-    cmd = [
-        "osmium", "extract",
-        f"--bbox={minx},{miny},{maxx},{maxy}",
-        "--overwrite",
-        f"--output={save_to_clipped}",
-        save_to_unclipped
-    ]
-    print("Running:", " ".join(cmd))
-    subprocess.run(cmd, check=True)
-    if os.path.getsize(save_to_clipped) < 300:
-        print(f'''
-              ERROR: The OSM file you provided does not seem to 
-              include your study area.
-              ''')
-        raise ValueError
-        #add LTS tags for biking
-    #TODO -- move to pre-scenario-run?
-
+        print(f"Running command: {' '.join(cmd)}")
+        try:
+            subprocess.run(cmd, check=True)
+            print(f"✅ Filtered file saved to: {save_to_unclipped_filtered}")
+        except subprocess.CalledProcessError as e:
+            print(f"❌ osmium command failed: {e}")
+    
+        cmd = [
+            "osmium", "extract",
+            f"--bbox={minx},{miny},{maxx},{maxy}",
+            "--overwrite",
+            f"--output={save_to_clipped}",
+            f"{save_to_unclipped_filtered}"
+        ]
+        print("Running:", " ".join(cmd))
+        subprocess.run(cmd, check=True)
+    
+        if os.path.getsize(save_to_clipped) < 300:
+            print(f'''
+                  ERROR: The OSM file you provided does not seem to 
+                  include your study area.
+                  ''')
+            raise ValueError
+            #add LTS tags for biking
+    
+    
+    
     # print('adding bike LTS tags')
     # prep_bike_osm.add_lts_tags(scenario + "/study_area.pbf",
     #                            scenario +"/study_area_LTS.pbf")

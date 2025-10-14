@@ -320,3 +320,4 @@ def evaluate_scenario(scenario_dir, user_classes, userclass_statistics, geometry
                                                  mode_selections_by_userclass)
 
     print("results by geometry sum", results_by_geometry.total_value.sum(), "results by userclass sum", results_by_userclass.total_value.sum())
+

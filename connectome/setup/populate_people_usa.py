@@ -121,6 +121,8 @@ def create_userclasses(tracts: gpd.GeoDataFrame,
                 }
                 user_classes.loc[next_idx] = row_data
 
+    user_classes.index = user_classes.user_class_id.values
+
     if save_to:
         user_classes.to_csv(save_to)
 
