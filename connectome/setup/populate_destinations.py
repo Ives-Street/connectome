@@ -166,8 +166,10 @@ def populate_all_dests_USA(geographies: gpd.GeoDataFrame,
     
     # Only save if a non-empty path is provided
     with_overture_and_lodes.index = with_overture_and_lodes['geom_id'].values
-
     if save_to:
+        columns_to_drop = [col for col in with_overture_and_lodes.columns if col in ['level_0', 'index']]
+        if columns_to_drop:
+            with_overture_and_lodes = with_overture_and_lodes.drop(columns=columns_to_drop)
         with_overture_and_lodes.to_file(save_to)
 
     return with_overture_and_lodes

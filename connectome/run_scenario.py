@@ -11,17 +11,15 @@ from pygris import states
 if not os.path.exists('setup'):
     os.chdir('connectome/')
 
+from connectome.setup.physical_conditions import physical_conditions
+from setup.populate_people_usa import populate_people_usa
 
 from setup.define_analysis_areas import (
     get_usa_tracts_from_address,
     get_usa_tracts_from_state,
 )
-from setup.populate_people_usa import (
-    create_userclasses, create_userclass_statistics)
 from setup.populate_destinations import populate_all_dests_USA, populate_destinations_overture_places
-from setup.physical_conditions import (
-    download_osm, make_osm_editable, get_GTFS_from_mobility_database
-)
+
 from setup.define_valuations import generalize_destination_units
 from routing_and_impedance import route_for_all_envs
 from representation import apply_experience_defintions
@@ -69,89 +67,58 @@ def run_scenario(scenario_dir,
     os.makedirs(f"{scenario_dir}/input_data", exist_ok=True)
     input_dir = f'{scenario_dir}/input_data'
 
-    # get analysis area
-    if not os.path.exists(f"{input_dir}/analysis_geometry.gpkg"):
+    # get analysis areas
+    if not os.path.exists(f"{input_dir}/analysis_areas.gpkg"):
 
         if address is not None:
             print(f"fetching census tracts from {address} with buffer {buffer}m")
-            study_area_tracts = get_usa_tracts_from_address(
+            analysis_areas = get_usa_tracts_from_address(
                 states=states,
                 address=address,
                 buffer_dist=buffer,
-                save_to = f"{input_dir}/analysis_geometry.gpkg"
+                save_to = f"{input_dir}/analysis_areas.gpkg"
             )
         else:
             print(f"fetching census tracts from {states} at the state level")
 
-            study_area_tracts = get_usa_tracts_from_state(
+            analysis_areas = get_usa_tracts_from_state(
                 states=['RI'],
-                save_to = f"{input_dir}/analysis_geometry.gpkg"
+                save_to = f"{input_dir}/analysis_areas.gpkg"
             )
     else:
         # print("loading tracts from disk")
-        study_area_tracts = gpd.read_file(f"{input_dir}/analysis_geometry.gpkg",index_col=0)
+        analysis_areas = gpd.read_file(f"{input_dir}/analysis_areas.gpkg",index_col=0)
 
     #get tract info
-    if not os.path.exists(f"{input_dir}/user_classes.csv"):
-        num_income_bins = 4
-        print("establishing user classes")
-        user_classes = create_userclasses(
-            study_area_tracts,
-            num_income_bins,
-            save_to = f"{input_dir}/user_classes.csv"
-        )
-    else:
-        print("loading user classes from disk")
-        user_classes = pd.read_csv(f"{input_dir}/user_classes.csv")
-        user_classes.index = user_classes.user_class_id.values
-        user_classes.fillna("",inplace=True)
+    populate_people_usa(scenario_dir)
 
-    if not os.path.exists(f"{input_dir}/userclass_statistics.csv"):
-        print("calculating user class statistics")
-        userclass_statistics = create_userclass_statistics(
-            study_area_tracts,
-            user_classes,
-            save_to=f"{input_dir}/userclass_statistics.csv"
-        )
-    else:
-        print("loading user class statistics from disk")
-        userclass_statistics = pd.read_csv(f"{input_dir}/userclass_statistics.csv")
+    #load results of getting tract info (need to reload analysis areas because we've added population density)
+    userclass_statistics = pd.read_csv(f"{input_dir}/userclass_statistics.csv")
+    user_classes = pd.read_csv(f"{input_dir}/user_classes.csv")
+    user_classes.index = user_classes.user_class_id.values
+    user_classes.fillna("", inplace=True)
+    analysis_areas = gpd.read_file(f"{input_dir}/analysis_areas.gpkg")
+    analysis_areas.index = analysis_areas['geom_id'].values
 
     #get destinations
-    if not os.path.exists(f"{input_dir}/destination_statistics.gpkg"):
+    if not 'lodes_jobs' in analysis_areas.columns:
         print("populating overture destinations")
-        study_area_tracts_with_dests = populate_all_dests_USA(
-            geographies = study_area_tracts,
+        analysis_areas = populate_all_dests_USA(
+            geographies = analysis_areas,
             states = states,
             already_tracts = True,
-            save_to = f"{input_dir}/destination_statistics.gpkg"
+            save_to = f"{input_dir}/analysis_areas.gpkg"
         )
     else:
         print("loading destinations from disk")
-        study_area_tracts_with_dests = gpd.read_file(f"{input_dir}/destination_statistics.gpkg")
-        study_area_tracts_with_dests.index = study_area_tracts_with_dests['geom_id'].values
+        analysis_areas = gpd.read_file(f"{input_dir}/analysis_areas.gpkg")
+        analysis_areas.index = analysis_areas['geom_id'].values
 
     #get physical conditions
-    if not os.path.exists(f"{input_dir}/osm_study_area.pbf"):
-        print("downloading osm data")
-        download_osm(
-            study_area_tracts,
-            f"{input_dir}/osm_large_file.pbf",
-            f"{input_dir}/osm_large_file_filtered.pbf",
-            f"{input_dir}/osm_study_area.pbf",
-            buffer_dist=500,
-        )
-        make_osm_editable(f"{input_dir}/osm_study_area.pbf", f"{input_dir}/osm_study_area_editable.osm")
-
-
-    if (
-            not os.path.exists(f"{input_dir}/GTFS/")# or
-            #not any(p.suffix == ".zip" for p in Path(f"{input_dir}/GTFS/").iterdir())
-    ):
-        print("downloading GTFS data")
-        get_GTFS_from_mobility_database(study_area_tracts,
-                                        f"{input_dir}/GTFS/",
-                                        0.2)
+    physical_conditions(scenario_dir,
+                        get_mapbox_traffic_benchmarks=True,
+                        num_traffic_groups=10,
+                        sample_count_per_traffic_group=3)
 
     if not os.path.exists(f"{scenario_dir}/routing/user_classes_with_routeenvs.csv"):
         print("defining experiences")
@@ -170,17 +137,16 @@ def run_scenario(scenario_dir,
     if not os.path.exists(f"{scenario_dir}/impedances"):
         print("routing")
         route_for_all_envs(f"{scenario_dir}",
-                           study_area_tracts_with_dests,
+                           analysis_areas,
                            user_classes_w_routeenvs
                            )
     else:
         print("routing already done. skipping.")
 
     #structure ttms and create cost matrices
-
     if not os.path.exists(f"{scenario_dir}/results/geometry_results.geojson"):
         print("evaluating")
-        evaluate_scenario(scenario_dir, user_classes_w_routeenvs, userclass_statistics, study_area_tracts_with_dests)
+        evaluate_scenario(scenario_dir, user_classes_w_routeenvs, userclass_statistics, analysis_areas)
         communication.make_radio_choropleth_map(
             scenario_dir=scenario_dir,
             in_data="results/geometry_results.gpkg",
@@ -192,8 +158,8 @@ def run_scenario(scenario_dir,
 
 if __name__ == "__main__":
     run_scenario(
-        scenario_dir = "testing/ri_test/regional_rail",
+        scenario_dir = "testing/ri_test/existing_conditions",
         states = ["RI"],
         address = None
     )
-    communication.compare_scenarios("testing/ri_test", "existing_conditions", "regional_rail")
+    #communication.compare_scenarios("testing/ri_test", "existing_conditions", "regional_rail")

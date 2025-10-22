@@ -6,8 +6,13 @@ import shapely
 import requests
 import shapely.geometry
 import geopandas as gpd
+import pandas as pd
 from mobility_db_api import MobilityAPI
 from pyrosm import OSM
+from datetime import datetime, timedelta
+import math
+import time
+import numpy as np
 
 import zipfile
 import tempfile
@@ -15,6 +20,7 @@ import shutil
 
 
 os.environ['MOBILITY_API_REFRESH_TOKEN'] = open("mobility_db_refresh_token.txt").read().rstrip("\n")
+os.environ['MAPBOX_TOKEN'] = open("mapbox_token.txt").read().rstrip("\n")
 
 def download_osm(geometry: gpd.GeoDataFrame, #unbuffered
                 save_to_unclipped: str,
@@ -326,3 +332,437 @@ def get_GTFS_from_mobility_database(
             sanitize_gtfs_file(outfile)
 
     print("Download complete")
+
+
+
+
+def groupings_for_traffic_estimates(analysis_areas: gpd.GeoDataFrame, number_groups: int) -> gpd.GeoDataFrame:
+    """Creates population-balanced groupings of analysis areas based on density and contiguity.
+    Any remaining areas that could not be grouped by population will be assigned to the closest group.
+
+    Args:
+        analysis_areas: GeoDataFrame containing polygons with population data
+        number_groups: Number of groups to create
+
+    Returns:
+        GeoDataFrame with new 'traffic_group' column indicating group assignment
+    """
+    # Calculate initial target population per group
+    total_population = analysis_areas['census_total_pop'].sum()
+    target_pop = total_population / number_groups
+    print(f"Target population per group: {target_pop:.0f}")
+
+    # Initialize tracking variables
+    remaining_areas = set(analysis_areas.index)
+    too_small_areas = set()
+    analysis_areas['traffic_group'] = -1  # -1 indicates unassigned
+    current_group = 0
+
+    while len(remaining_areas) > 0 and current_group < number_groups:
+        # Find area with highest density that isn't grouped yet
+        densities = analysis_areas.loc[list(remaining_areas)]['population_per_sqkm']
+        seed_area = densities.idxmax()
+
+        # Start new group with this seed area
+        analysis_areas.loc[seed_area, 'traffic_group'] = current_group
+        current_pop = analysis_areas.loc[seed_area, 'census_total_pop']
+        remaining_areas.remove(seed_area)
+
+        create_group = True
+
+        # Keep adding nearest neighbors until target population reached or no more contiguous areas
+        while current_pop < target_pop and len(remaining_areas) > 0:
+            # Find contiguous areas not yet in a group
+            contiguous = set()
+            for area_idx in analysis_areas[analysis_areas['traffic_group'] == current_group].index:
+                area_geom = analysis_areas.loc[area_idx, 'geometry']
+                touching = analysis_areas.loc[list(remaining_areas)].touches(area_geom)
+                contiguous.update(touching[touching].index)
+
+            if not contiguous:
+                print(f"No more contiguous areas for traffic_group {current_group}")
+
+                # Check if current group is too small (less than 30% of target)
+
+                if current_pop < (target_pop * 0.3):
+                    print(f"Group {current_group} is too small ({current_pop:.0f} < {target_pop * 0.3:.0f})")
+
+                    # Reset areas in current group to unassigned
+                    small_group_areas = analysis_areas[analysis_areas['traffic_group'] == current_group].index
+                    analysis_areas.loc[small_group_areas, 'traffic_group'] = -1
+                    too_small_areas.update(small_group_areas)
+
+                    create_group = False
+                break
+
+            # Add nearest contiguous area - find centroid of current group
+            current_group_geoms = analysis_areas[analysis_areas['traffic_group'] == current_group]
+            group_centroid = current_group_geoms.geometry.unary_union.centroid
+            
+            next_area = min(contiguous,
+                            key=lambda x: group_centroid.distance(
+                                analysis_areas.loc[x, 'geometry'].centroid))
+
+            analysis_areas.loc[next_area, 'traffic_group'] = current_group
+            current_pop += analysis_areas.loc[next_area, 'census_total_pop']
+            remaining_areas.remove(next_area)
+
+        if create_group:
+            print(
+                f"Created group {current_group} with {len(analysis_areas[analysis_areas['traffic_group'] == current_group])} areas and population {current_pop}")
+
+            # Only increment group and recalculate if we didn't reset
+            current_group += 1
+
+        # Recalculate target for remaining groups
+        if len(remaining_areas) > 0:
+            remaining_pop = analysis_areas.loc[list(remaining_areas), 'census_total_pop'].sum()
+            remaining_groups = number_groups - current_group
+            if remaining_groups > 0:  # Avoid division by zero
+                target_pop = remaining_pop / remaining_groups
+                print(f"New target population per traffic_group: {target_pop:.0f}")
+            else:
+                print("No more groups available, will assign remaining areas to nearest groups")
+
+    remaining_areas = remaining_areas.union(too_small_areas)
+    if len(remaining_areas) > 0:
+        print(f"Assigning {len(remaining_areas)} remaining areas to closest groups")
+        for area in remaining_areas:
+            # Get centroid of current area
+            area_centroid = analysis_areas.loc[area, 'geometry'].centroid
+
+            # Find centroids of all existing groups
+            group_centroids = {}
+            for group in range(current_group):
+                group_geoms = analysis_areas[analysis_areas['traffic_group'] == group]
+                group_centroids[group] = group_geoms.geometry.unary_union.centroid
+
+            # Find closest group by checking adjacent polygons
+            current_area_geom = analysis_areas.loc[area, 'geometry']
+            adjacent_areas = []
+
+            # Find all adjacent polygons that are already grouped
+            for other_area in analysis_areas[analysis_areas['traffic_group'] != -1].index:
+                if current_area_geom.touches(analysis_areas.loc[other_area, 'geometry']):
+                    adjacent_areas.append(other_area)
+
+            if adjacent_areas:
+                # Find the adjacent polygon with closest centroid
+                closest_adjacent = min(adjacent_areas,
+                                       key=lambda x: area_centroid.distance(
+                                           analysis_areas.loc[x, 'geometry'].centroid))
+                closest_group = analysis_areas.loc[closest_adjacent, 'traffic_group']
+            else:
+                # If no adjacent polygons, fall back to centroid distance to group
+                closest_group = min(group_centroids.keys(),
+                                    key=lambda g: area_centroid.distance(group_centroids[g]))
+
+            # Assign to closest group
+            analysis_areas.loc[area, 'traffic_group'] = closest_group
+
+    return analysis_areas
+
+
+def select_traffic_samples_by_group(analysis_areas: gpd.GeoDataFrame,
+                                    spots_per_group: int) -> gpd.GeoDataFrame:
+    """Select traffic sample locations for each traffic group.
+
+    Args:
+        analysis_areas: GeoDataFrame with traffic_group column
+        spots_per_group: Number of sample locations to select per group
+
+    Returns:
+        GeoDataFrame with traffic_sample_selection column
+    """
+    for group in analysis_areas['traffic_group'].unique():
+        group_areas = analysis_areas[analysis_areas['traffic_group'] == group].copy()
+        selected = select_traffic_sample_polygons(group_areas,
+                                                  spots_per_group)
+        analysis_areas.loc[selected.index, 'traffic_sample_selection'] = selected['traffic_sample_selection']
+    return analysis_areas
+
+
+def select_traffic_sample_polygons(group_gdf: gpd.GeoDataFrame,
+                                   num_to_select: int,
+                                   interior_bonus = 2,) -> gpd.GeoDataFrame:
+    """Select sample polygons from a contiguous group, prioritizing interior locations.
+
+    First selects the highest-population interior polygon, then selects additional
+    polygons to maximize distance from already-selected ones, preferring interior polygons.
+
+    Args:
+        group_gdf: GeoDataFrame of contiguous polygons
+        num_to_select: Number of polygons to select
+
+    Returns:
+        GeoDataFrame with added 'traffic_sample_selection' column
+    """
+    group_gdf['traffic_sample_selection'] = False
+
+    # Identify interior polygons (surrounded by others in the group)
+    group_boundary = group_gdf.geometry.unary_union.boundary
+    interior_mask = ~group_gdf.geometry.touches(group_boundary)
+    interior_indices = group_gdf[interior_mask].index
+
+    # First selection: highest population interior polygon
+    if len(interior_indices) > 0:
+        first_selection = group_gdf.loc[interior_indices, 'census_total_pop'].idxmax()
+    else:
+        # Fallback if no interior polygons exist
+        first_selection = group_gdf['census_total_pop'].idxmax()
+
+    group_gdf.loc[first_selection, 'traffic_sample_selection'] = True
+    selected_indices = [first_selection]
+
+    # Subsequent selections: maximize distance from selected, prefer interior
+    for _ in range(num_to_select - 1):
+        remaining = group_gdf[~group_gdf['traffic_sample_selection']].index
+        if len(remaining) == 0:
+            break
+
+        # Calculate minimum distance to any selected polygon
+        selected_centroids = group_gdf.loc[selected_indices, 'geometry'].centroid
+        min_distances = {}
+
+        for idx in remaining:
+            candidate_centroid = group_gdf.loc[idx, 'geometry'].centroid
+            distances = [candidate_centroid.distance(sc) for sc in selected_centroids]
+            min_distances[idx] = min(distances)
+
+        # Prefer interior polygons by boosting their effective distance
+        for idx in remaining:
+            if idx in interior_indices:
+                min_distances[idx] *= interior_bonus  # 50% bonus for interior locations
+
+        # Select polygon with maximum distance
+        next_selection = max(min_distances, key=min_distances.get)
+        group_gdf.loc[next_selection, 'traffic_sample_selection'] = True
+        selected_indices.append(next_selection)
+
+    return group_gdf
+
+
+def get_next_wednesday_9am():
+    """Get the datetime for next Wednesday at 9am local time.
+    
+    Returns:
+        datetime: Next Wednesday at 9:00 AM
+    """
+    now = datetime.now()
+    days_ahead = 2 - now.weekday()  # Wednesday is 2
+    if days_ahead <= 0 or (days_ahead == 0 and now.hour >= 9):
+        # Target day already happened this week or happening now, get next week
+        days_ahead += 7
+    next_wednesday = now + timedelta(days=days_ahead)
+    # Set to 9:00 AM
+    next_wednesday = next_wednesday.replace(hour=9, minute=0, second=0, microsecond=0)
+    return next_wednesday
+
+
+def benchmark_driving_times(analysis_areas: gpd.GeoDataFrame,
+                           mapbox_token: str,
+                           save_to: str,
+                           chunk_size: int = 5,
+                           delay_between_requests: float = 0.1) -> pd.DataFrame:
+    """Benchmark actual driving travel times using Mapbox Matrix API.
+    
+    Uses the mapbox/driving-traffic profile to get real-world travel times
+    between selected traffic sample points. Automatically chunks requests
+    to handle the 10-coordinate limit for driving-traffic profile.
+    
+    Args:
+        analysis_areas: GeoDataFrame with traffic_sample_selection column
+        mapbox_token: Mapbox API access token
+        save_to: Path to save the results CSV
+        chunk_size: Size of chunks for matrix requests (default 5 for 5x5 matrices)
+        delay_between_requests: Seconds to wait between API calls (rate limiting)
+    
+    Returns:
+        DataFrame with columns: origin_id, destination_id, duration_seconds, distance_meters
+        
+    Raises:
+        ValueError: If more than 44 sample points are selected
+    """
+    # Filter to traffic sample points
+    sample_points = analysis_areas[analysis_areas['traffic_sample_selection'] == True].copy()
+    
+    if len(sample_points) == 0:
+        raise ValueError("No points with traffic_sample_selection==True found")
+    
+    if len(sample_points) > 44:
+        raise ValueError(
+            f"Too many sample points ({len(sample_points)}). "
+            f"Maximum is 44 to stay under ~2,000 coordinate pairs."
+        )
+    
+    print(f"Benchmarking driving times for {len(sample_points)} sample points")
+    
+    # Get centroids as coordinates
+    sample_points['centroid'] = sample_points.geometry.to_crs('EPSG:4326').centroid
+    sample_points['lon'] = sample_points['centroid'].x
+    sample_points['lat'] = sample_points['centroid'].y
+    
+    # Get departure time (next Wednesday at 9am)
+    departure_time = get_next_wednesday_9am()
+    departure_time_str = departure_time.strftime("%Y-%m-%dT%H:%M")
+    print(f"Using departure time: {departure_time_str}")
+    
+    # Prepare to collect results
+    all_results = []
+    
+    # Create chunks of points
+    point_ids = list(sample_points.index)
+    n_points = len(point_ids)
+    
+    # Calculate number of chunks needed
+    n_chunks = math.ceil(n_points / chunk_size)
+    print(f"Making {n_chunks * n_chunks} API requests ({n_chunks}x{n_chunks} chunks)")
+    
+    # Process in chunks
+    request_count = 0
+    for i in range(n_chunks):
+        origin_start = i * chunk_size
+        origin_end = min((i + 1) * chunk_size, n_points)
+        origin_chunk = point_ids[origin_start:origin_end]
+        
+        for j in range(n_chunks):
+            dest_start = j * chunk_size
+            dest_end = min((j + 1) * chunk_size, n_points)
+            dest_chunk = point_ids[dest_start:dest_end]
+            
+            # Build coordinate string
+            # Combine origins and destinations (API requires all coords in one list)
+            all_coords = origin_chunk + dest_chunk
+            
+            # Remove duplicates while preserving order
+            seen = set()
+            unique_coords = []
+            for coord_id in all_coords:
+                if coord_id not in seen:
+                    seen.add(coord_id)
+                    unique_coords.append(coord_id)
+            
+            # Build coordinate string for API
+            coord_strings = []
+            for coord_id in unique_coords:
+                lon = sample_points.loc[coord_id, 'lon']
+                lat = sample_points.loc[coord_id, 'lat']
+                coord_strings.append(f"{lon},{lat}")
+            
+            coordinates = ";".join(coord_strings)
+            
+            # Map original indices to positions in unique_coords
+            origin_indices = [unique_coords.index(oid) for oid in origin_chunk]
+            dest_indices = [unique_coords.index(did) for did in dest_chunk]
+            
+            # Build API request
+            sources_param = ";".join(str(idx) for idx in origin_indices)
+            destinations_param = ";".join(str(idx) for idx in dest_indices)
+            
+            url = f"https://api.mapbox.com/directions-matrix/v1/mapbox/driving-traffic/{coordinates}"
+            params = {
+                'sources': sources_param,
+                'destinations': destinations_param,
+                'annotations': 'distance,duration',
+                #'depart_at': departure_time_str,
+                'access_token': mapbox_token
+            }
+            
+            # Make request
+            request_count += 1
+            print(f"Request {request_count}/{n_chunks * n_chunks}: "
+                  f"Origins {origin_start}-{origin_end-1}, Destinations {dest_start}-{dest_end-1}")
+
+
+            response = requests.get(url, params=params)
+            
+            if response.status_code != 200:
+                print(f"Error: {response.status_code}")
+                print(response.text)
+                import pdb; pdb.set_trace()
+                raise RuntimeError(f"Mapbox API request failed: {response.text}")
+            
+            data = response.json()
+            
+            # Parse results
+            durations = data.get('durations', [])
+            distances = data.get('distances', [])
+            
+            # Store results
+            for origin_idx, origin_id in enumerate(origin_chunk):
+                for dest_idx, dest_id in enumerate(dest_chunk):
+                    duration = durations[origin_idx][dest_idx]
+                    distance = distances[origin_idx][dest_idx]
+                    
+                    # Mapbox returns null for unreachable destinations
+                    if duration is not None and distance is not None:
+                        all_results.append({
+                            'origin_id': origin_id,
+                            'destination_id': dest_id,
+                            'duration_seconds': duration,
+                            'distance_meters': distance
+                        })
+            
+            # Rate limiting delay
+            if delay_between_requests > 0 and request_count < n_chunks * n_chunks:
+                time.sleep(delay_between_requests)
+    
+    # Convert to DataFrame
+    results_df = pd.DataFrame(all_results)
+    
+    print(f"Collected {len(results_df)} origin-destination pairs")
+    
+    # Save results
+    results_df.to_csv(save_to, index=False)
+    print(f"Saved results to {save_to}")
+    
+    return results_df
+
+def physical_conditions(scenario_dir,
+                        get_mapbox_traffic_benchmarks=True,
+                        num_traffic_groups=7,
+                        sample_count_per_traffic_group=2):
+    input_dir = f"{scenario_dir}/input_data/"
+    analysis_areas = gpd.read_file(f"{input_dir}/analysis_areas.gpkg")
+    analysis_areas.index = analysis_areas['geom_id'].values
+
+    # Add traffic groups and sample points
+    if get_mapbox_traffic_benchmarks:
+        if not os.path.exists(f"{input_dir}/traffic_sample_triptimes.csv"):
+            # First create traffic groups
+            analysis_areas = groupings_for_traffic_estimates(analysis_areas, num_traffic_groups)
+            # Then select sample points within each group
+            analysis_areas = select_traffic_samples_by_group(analysis_areas, sample_count_per_traffic_group)
+            # And call Mapbox for actual driving times
+            driving_times = benchmark_driving_times(analysis_areas,
+                                                    os.environ['MAPBOX_TOKEN'],
+                                                    f"{scenario_dir}/input_data/traffic_sample_triptimes.csv")
+
+        # Remove any existing index-related columns before saving
+        columns_to_drop = [col for col in analysis_areas.columns if col in ['level_0', 'index']]
+        if columns_to_drop:
+            analysis_areas = analysis_areas.drop(columns=columns_to_drop)
+        
+        analysis_areas.to_file(f"{input_dir}/analysis_areas.gpkg", driver="GPKG")
+
+    # Get OSM data if it doesn't exist
+    if not os.path.exists(f"{input_dir}/osm_study_area.pbf"):
+        print("downloading osm data")
+        download_osm(
+            analysis_areas,
+            f"{input_dir}/osm_large_file.pbf",
+            f"{input_dir}/osm_large_file_filtered.pbf",
+            f"{input_dir}/osm_study_area.pbf",
+            buffer_dist=500,
+        )
+        make_osm_editable(f"{input_dir}/osm_study_area.pbf", f"{input_dir}/osm_study_area_editable.osm")
+
+    # Get GTFS data if it doesn't exist
+    if (
+            not os.path.exists(f"{input_dir}/GTFS/")# or
+            #not any(p.suffix == ".zip" for p in Path(f"{input_dir}/GTFS/").iterdir())
+    ):
+        print("downloading GTFS data")
+        get_GTFS_from_mobility_database(analysis_areas,
+                                        f"{input_dir}/GTFS/",
+                                        0.2)

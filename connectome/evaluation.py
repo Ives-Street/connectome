@@ -194,75 +194,83 @@ def get_userclass_results(scenario_dir,
     results_by_userclass.to_csv(f"{scenario_dir}/results/userclass_results.csv")
     return results_by_userclass
 
-
-def get_geometry_results_with_viz(scenario_dir,
-                         userclass_gtms,
-                         geometry_and_dests,
-                         value_sum_total_by_OD_by_userclass,
-                         population_by_geom_and_userclass,
-                         mode_selections_by_userclass):
-    result_categories = ['total_value', 'total_pop', 'per_capita']
+def get_geometry_results_with_viz(
+    scenario_dir,
+    userclass_gtms,
+    geometry_and_dests,                      # GeoDataFrame indexed by geom_id (has 'geometry')
+    value_sum_total_by_OD_by_userclass,      # dict[userclass] -> DataFrame (index=geom_id, columns=dest ids)
+    population_by_geom_and_userclass,        # DataFrame indexed by geom_id, columns=userclasses
+    mode_selections_by_userclass             # dict[userclass] -> DataFrame same shape as above values
+):
+    # --- columns ---
+    result_categories = ['total_value', 'population', 'per_capita']
     result_categories += [f"percent_from_{mode}" for mode in MODES]
     result_categories += [f"value_from_{mode}" for mode in MODES]
 
-    results_by_geometry = gpd.GeoDataFrame(index=list(geometry_and_dests.geom_id),
-                                           columns=result_categories)
+    # Ensure index alignment
+    geom_index = geometry_and_dests.index
 
+    # Container for per-userclass GeoDFs
     by_geom_and_userclass = {}
-    for userclass in userclass_gtms.keys():
-        by_geom_and_userclass[userclass] = gpd.GeoDataFrame(
-            index=list(geometry_and_dests.geom_id),
-            columns=result_categories)
 
+    # --- per-userclass vectorized summaries ---
+    per_uc_frames = []
+    for uc in userclass_gtms.keys():
+        values = value_sum_total_by_OD_by_userclass[uc].loc[geom_index]           # [orig x dest]
+        modes  = mode_selections_by_userclass[uc].loc[geom_index]                  # same shape
+        pop_s  = population_by_geom_and_userclass[uc].reindex(geom_index)          # Series by geom
 
-    print("summarizing results by geometry")
-    for geom_id in tqdm(list(results_by_geometry.index)):
-        results_by_geometry.loc[geom_id, 'geometry'] = geometry_and_dests.loc[geom_id, 'geometry']
-        total_value_tally = 0
-        total_population = 0
-        mode_value_tallies = {}
-        for mode in MODES:
-            mode_value_tallies[mode] = 0
-        for userclass in userclass_gtms.keys():
-            by_geom_and_userclass[userclass].loc[geom_id, 'geometry'] = geometry_and_dests.loc[geom_id, 'geometry']
+        total_value = values.sum(axis=1)                                           # per geom
+        # per-mode value: mask once per mode and sum rows
+        per_mode_vals = {
+            mode: values.where(modes.eq(mode)).sum(axis=1) for mode in MODES
+        }
 
-
-            values_by_OD = value_sum_total_by_OD_by_userclass[userclass]
-            mode_selections = mode_selections_by_userclass[userclass]
-            population = population_by_geom_and_userclass.loc[geom_id, userclass]
-
-            value_of_geom_and_userclass = values_by_OD.loc[geom_id, :].sum()
-            total_value_tally += value_of_geom_and_userclass
-            by_geom_and_userclass[userclass].loc[geom_id, 'total_value'] = value_of_geom_and_userclass
-            total_population += population
-            by_geom_and_userclass[userclass].loc[geom_id, 'population'] = population
-            by_geom_and_userclass[userclass].loc[
-                geom_id, 'per_capita'] = value_of_geom_and_userclass / population if population > 0 else np.nan
-
-            for mode in MODES:
-                mask = mode_selections != mode
-                val_from_mode = values_by_OD.mask(mask).loc[geom_id, :].sum()
-                mode_value_tallies[mode] += val_from_mode
-                by_geom_and_userclass[userclass].loc[geom_id, f"value_from_{mode}"] = val_from_mode
-                by_geom_and_userclass[userclass].loc[
-                    geom_id, f"percent_from_{mode}"] = val_from_mode / value_of_geom_and_userclass if value_of_geom_and_userclass > 0 else np.nan
-        results_by_geometry.loc[geom_id, 'total_value'] = total_value_tally
-        results_by_geometry.loc[geom_id, 'total_pop'] = total_population
-        results_by_geometry.loc[
-            geom_id, 'per_capita'] = total_value_tally / total_population if total_population > 0 else np.nan
+        # Assemble userclass frame
+        df_uc = pd.DataFrame(index=geom_index)
+        df_uc['total_value'] = total_value.astype('float64')
+        df_uc['population']  = pop_s.astype('float64')
+        df_uc['per_capita']  = df_uc['total_value'] / df_uc['population'].replace(0, np.nan)
 
         for mode in MODES:
-            results_by_geometry.loc[geom_id, f"percent_from_{mode}"] = mode_value_tallies[
-                                                                           mode] / total_value_tally if total_value_tally > 0 else np.nan
-            results_by_geometry.loc[geom_id, f"value_from_{mode}"] = mode_value_tallies[mode]
-    
-    # Ensure all numeric columns are proper numeric types before saving
-    numeric_columns = result_categories
-    for col in numeric_columns:
-        results_by_geometry[col] = pd.to_numeric(results_by_geometry[col], errors='coerce')
-    
-    results_by_geometry.crs = geometry_and_dests.crs
-    results_by_geometry.to_file(f"{scenario_dir}/results/geometry_results.gpkg", driver="GPKG")
+            v = per_mode_vals[mode].astype('float64')
+            df_uc[f"value_from_{mode}"] = v
+            df_uc[f"percent_from_{mode}"] = v / df_uc['total_value'].replace(0, np.nan)
+
+        # attach geometry (keep CRS)
+        gdf_uc = gpd.GeoDataFrame(df_uc, geometry=geometry_and_dests.geometry, crs=geometry_and_dests.crs)
+
+        by_geom_and_userclass[uc] = gdf_uc
+        try:
+            per_uc_frames.append(gdf_uc[result_categories])  # numeric only for later aggregation
+        except:
+            import pdb; pdb.set_trace()
+
+    # --- aggregate across userclasses (vectorized) ---
+    # Sum numeric columns across all userclasses, then compute derived % and per_capita
+    agg_numeric = pd.concat(per_uc_frames, axis=1)
+    # Build a DataFrame with summed columns
+    totals = pd.DataFrame(index=geom_index)
+    totals['total_value'] = agg_numeric.filter(regex=r'(^|_)total_value$').sum(axis=1)
+    totals['total_pop']   = agg_numeric.filter(regex=r'(^|_)population$').sum(axis=1)
+
+    for mode in MODES:
+        totals[f"value_from_{mode}"] = agg_numeric.filter(regex=fr'(^|_)value_from_{mode}$').sum(axis=1)
+
+    totals['per_capita'] = totals['total_value'] / totals['total_pop'].replace(0, np.nan)
+    for mode in MODES:
+        totals[f"percent_from_{mode}"] = totals[f"value_from_{mode}"] / totals['total_value'].replace(0, np.nan)
+
+    # Final GeoDataFrame with geometry & CRS
+    totals.rename(columns={'total_pop': 'population'}, inplace=True)
+    results_by_geometry = gpd.GeoDataFrame(
+        totals[result_categories], geometry=geometry_and_dests.geometry, crs=geometry_and_dests.crs
+    )
+
+    # --- write outputs & maps ---
+    out_dir = f"{scenario_dir}/results"
+    os.makedirs(out_dir, exist_ok=True)
+    results_by_geometry.to_file(f"{out_dir}/geometry_results.gpkg", driver="GPKG")
 
     communication.make_radio_choropleth_map(
         scenario_dir=scenario_dir,
@@ -270,13 +278,14 @@ def get_geometry_results_with_viz(scenario_dir,
         outfile="results/geometry_results.html"
     )
 
-    os.makedirs(f"{scenario_dir}/results/by_userclass/", exist_ok=True)
-    for userclass in userclass_gtms.keys():
-        by_geom_and_userclass[userclass].to_file(f"{scenario_dir}/results/by_userclass/results_{userclass}.gpkg", driver="GPKG")
+    by_uc_dir = f"{out_dir}/by_userclass"
+    os.makedirs(by_uc_dir, exist_ok=True)
+    for uc, gdf_uc in by_geom_and_userclass.items():
+        gdf_uc.to_file(f"{by_uc_dir}/results_{uc}.gpkg", driver="GPKG")
         communication.make_radio_choropleth_map(
             scenario_dir=scenario_dir,
-            in_data=by_geom_and_userclass[userclass],
-            outfile=f"results/by_userclass/results_{userclass}.html"
+            in_data=gdf_uc,
+            outfile=f"results/by_userclass/results_{uc}.html"
         )
 
     return results_by_geometry

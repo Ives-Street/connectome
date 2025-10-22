@@ -1,4 +1,5 @@
 import os
+import re
 import pandas as pd
 import geopandas as gpd
 import folium
@@ -82,6 +83,22 @@ def visualize_access_to_zone(scenario_dir,
         f"Saved visualization of access to zone {target_zone_id} to {outpath}"
     )
 
+
+
+def save_map_safely(m, out_path: str):
+    print("saving map safely to", out_path)
+    html = m.get_root().render()
+    # Remove any leading dot(s) accidentally inserted before an object literal
+    # Example broken: "..., crs: L.CRS.EPSG3857, ..{ \"zoom\": 12 }"
+    # Regex explanation:
+    #   (?<!\d)   -> the dot(s) are NOT part of a decimal number
+    #   \.{1,}    -> one or more dots
+    #   \s*\{     -> optional whitespace then a literal "{"
+    html = re.sub(r'(?<!\d)\.{1,}\s*\{', '{', html)
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html)
 
 def _coerce_and_prettify_numeric_columns(gdf: gpd.GeoDataFrame,
                                          exclude_cols: list = None) -> tuple[gpd.GeoDataFrame, dict]:
@@ -364,36 +381,45 @@ def make_radio_choropleth_map(
         gj.add_to(m)
         layer_js_names[col] = gj.get_name()  # the variable name in the rendered JS
 
-    # Initial selection
-    initial = initial or numeric_columns[0]
-    if initial not in numeric_columns:
-        initial = numeric_columns[0]
+    # Initial selection - ensure it's an actual layer key
+    initial = initial or next(iter(layer_js_names))
+    if initial not in layer_js_names:
+        initial = next(iter(layer_js_names))
 
     # Inject our radio UI and the show/hide logic + legend switching
 
     class _RadioController(MacroElement):
+        """
+        Leaflet radio selector for metric layers, with single active legend + title.
+        Expects:
+          - this.layer_js_names: dict {metric_name: folium_js_var_name}
+          - this.legend_html_snippets: dict {metric_name: legend_html}
+          - this.cols: list[str] of metric names (order shown in UI)
+          - this.initial: str initial metric key (must be in layer_js_names)
+        """
         _template = Template("""
         {% macro script(this, kwargs) %}
         (function() {
           var map = {{ this._parent.get_name() }};
 
+          // Metric layers keyed by metric name (values are Leaflet layer vars)
           var layers = {
             {% for col, jsname in this.layer_js_names.items() -%}
             "{{ col }}": {{ jsname }}{{ "," if not loop.last else "" }}
             {%- endfor %}
           };
 
-          // Legend root (bottom-right)
+          // -------- Legends root (bottom-right) --------
           var legendRoot = L.control({position: 'bottomright'});
           legendRoot.onAdd = function() {
             var div = L.DomUtil.create('div');
-            L.DomEvent.disableClickPropagation(div);
             div.id = 'legend-root';
+            L.DomEvent.disableClickPropagation(div);
             return div;
           };
           legendRoot.addTo(map);
 
-          // Insert all legends (hidden by default)
+          // Inject all legends (hidden by default)
           var legendRootDiv = document.getElementById('legend-root');
           legendRootDiv.innerHTML = `
             {% for col, html in this.legend_html_snippets.items() -%}
@@ -402,18 +428,27 @@ def make_radio_choropleth_map(
           `;
 
           function showOnly(col) {
-            Object.keys(layers).forEach(function(k) {
-              if (map.hasLayer(layers[k])) map.removeLayer(layers[k]);
-            });
-            map.addLayer(layers[col]);
+            if (!layers[col]) { console.warn("Unknown metric:", col); return; }
 
+            // Remove any metric layers currently attached
+            Object.keys(layers).forEach(function(k) {
+              try { map.removeLayer(layers[k]); } catch (e) {}
+            });
+
+            // Add selected metric layer
+            try { map.addLayer(layers[col]); } catch (e) {
+              console.error("Failed to add selected layer", col, e);
+              return;
+            }
+
+            // Toggle legend visibility so exactly one is shown
             var els = legendRootDiv.querySelectorAll('.legend-container');
             els.forEach(function(e){ e.style.display = 'none'; });
             var active = document.getElementById('legend-' + col);
             if (active) active.style.display = 'block';
           }
 
-          // Radio UI (top-right)
+          // -------- Radio UI (top-right) --------
           var radioCtl = L.control({position: 'topright'});
           radioCtl.onAdd = function() {
             var div = L.DomUtil.create('div', 'leaflet-control-layers leaflet-control');
@@ -435,42 +470,54 @@ def make_radio_choropleth_map(
           };
           radioCtl.addTo(map);
 
-          // Add title
-          var titleDiv = L.control({position: 'topcenter'});
-          titleDiv.onAdd = function() {
+          // -------- Title readout (top-left) --------
+          var titleCtl = L.control({position: 'topleft'});
+          titleCtl.onAdd = function() {
             var div = L.DomUtil.create('div');
+            div.id = 'metric-title';
             div.style.background = 'white';
-            div.style.padding = '8px 10px';
+            div.style.padding = '6px 10px';
             div.style.borderRadius = '6px';
             div.style.boxShadow = '0 1px 4px rgba(0,0,0,0.3)';
-            div.id = 'map-title';
+            div.style.fontWeight = '600';
+            L.DomEvent.disableClickPropagation(div);
             return div;
           };
-          titleDiv.addTo(map);
+          titleCtl.addTo(map);
 
-          // Update title function
-          function updateTitle(metric) {
-            var titleElement = document.getElementById('map-title');
-            titleElement.innerHTML = `<h3 style="margin:0">${metric}</h3>`;
+          function setTitle(metric) {
+            var el = document.getElementById('metric-title');
+            if (el) el.textContent = metric;
           }
 
-          // Wire up change
-          var radios = document.getElementsByName('metric-radio');
-          [].forEach.call(radios, function(r) {
-            r.addEventListener('change', function(ev) {
-              if (ev.target.checked) {
-                showOnly(ev.target.value);
-                updateTitle(ev.target.value);
-              }
-            });
-          });
+          // Change handling via event delegation (robust even if radios re-render)
+          document.addEventListener('change', function(ev) {
+            var t = ev.target;
+            if (t && t.name === 'metric-radio' && t.checked) {
+              showOnly(t.value);
+              setTitle(t.value);
+            }
+          }, true);
 
-          // Activate initial and set initial title
-          showOnly("{{ this.initial }}");
-          updateTitle("{{ this.initial }}");
+          // Activate initial selection
+          var initial = "{{ this.initial }}";
+          // Ensure corresponding radio is checked (in case browser ignored checked attr)
+          var radios = document.getElementsByName('metric-radio');
+          [].forEach.call(radios, function(r){ r.checked = (r.value === initial); });
+
+          showOnly(initial);
+          setTitle(initial);
         })();
         {% endmacro %}
         """)
+
+        def __init__(self, layer_js_names, legend_html_snippets, cols, initial):
+            super().__init__()
+            self._name = "RadioController"
+            self.layer_js_names = layer_js_names
+            self.legend_html_snippets = legend_html_snippets
+            self.cols = cols
+            self.initial = initial
 
         def __init__(self, layer_js_names, legend_html_snippets, cols, initial):
             super().__init__()
@@ -496,10 +543,12 @@ def make_radio_choropleth_map(
     if not np.isnan(bounds).any():
         m.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
 
+
     if outfile:
         outfile_path = os.path.join(scenario_dir, outfile)
         os.makedirs(os.path.dirname(outfile_path), exist_ok=True)
         m.save(outfile_path)
+
 
     return m
 
@@ -690,7 +739,6 @@ def compare_scenarios(
         in_data=geom_comparison,
         outfile="value_comparison_map.html",
         columns_to_viz=value_cols,
-        initial="per_capita_pct_change",
     )
 
     # Map 2: Mode share changes
@@ -706,7 +754,6 @@ def compare_scenarios(
             in_data=geom_comparison,
             outfile="mode_share_comparison_map.html",
             columns_to_viz=mode_share_cols,
-            initial=mode_share_cols[0],
         )
 
     # ========================================================================

@@ -8,6 +8,8 @@ from census import Census
 from pandas import DataFrame
 from tqdm import tqdm
 import numpy as np
+from itertools import product
+import os
 
 #IF I want to add this (rather than hexagon things), i'll include the function in this file.
 #from .OLDpedestriansfirst import make_patches
@@ -34,17 +36,67 @@ acs_variables = {
 
 
 def get_acs_data_for_tracts(tracts: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    c = Census("b55e824143791db1b0dc9dc85688cbefd0b3a04f") #TODO shouldn't be hardcoded, can be set up in python env 
+    print("getting ACS data for tracts")
+    c = Census("b55e824143791db1b0dc9dc85688cbefd0b3a04f") #TODO shouldn't be hardcoded, can be set up in python env
     acs_variable_names = list(acs_variables.keys())
-    for idx in tqdm(list(tracts.index)):
-        vals = c.acs5.state_county_tract(acs_variable_names,
-                                         tracts.loc[idx, 'STATEFP'],
-                                         tracts.loc[idx, 'COUNTYFP'],
-                                         tracts.loc[idx, 'TRACTCE'],
-                                         )[0]
-        for var_name in acs_variable_names:
-            tracts.loc[idx, var_name] = vals[var_name]
-    tracts['census_total_pop'] = tracts['B01003_001E']
+    
+    # Group tracts by state and county to batch API calls
+    tracts_by_state_county = {}
+    for idx in tracts.index:
+        state = tracts.loc[idx, 'STATEFP']
+        county = tracts.loc[idx, 'COUNTYFP']
+        key = (state, county)
+        if key not in tracts_by_state_county:
+            tracts_by_state_county[key] = []
+        tracts_by_state_county[key].append(idx)
+    
+    # Make batched API calls per state-county combination
+    print(f"Fetching ACS data for {len(tracts_by_state_county)} state-county combinations")
+    for (state, county), tract_indices in tqdm(tracts_by_state_county.items()):
+        # Get all tracts in this county at once
+        try:
+            county_data = c.acs5.state_county_tract(
+                acs_variable_names,
+                state,
+                county,
+                Census.ALL  # Get all tracts in the county
+            )
+            
+            # Create a lookup dictionary by tract code
+            data_by_tract = {row['tract']: row for row in county_data}
+            
+            # Assign data to the tracts we're interested in
+            for idx in tract_indices:
+                tract_code = tracts.loc[idx, 'TRACTCE']
+                if tract_code in data_by_tract:
+                    vals = data_by_tract[tract_code]
+                    for var_name in acs_variable_names:
+                        tracts.loc[idx, var_name] = vals[var_name]
+                else:
+                    # Tract not found in county data, make individual call as fallback
+                    vals = c.acs5.state_county_tract(
+                        acs_variable_names,
+                        state,
+                        county,
+                        tract_code
+                    )[0]
+                    for var_name in acs_variable_names:
+                        tracts.loc[idx, var_name] = vals[var_name]
+        except Exception as e:
+            print(f"Error fetching data for state {state}, county {county}: {e}")
+            print("Falling back to individual tract calls")
+            # Fallback to individual calls for this county
+            for idx in tract_indices:
+                vals = c.acs5.state_county_tract(
+                    acs_variable_names,
+                    tracts.loc[idx, 'STATEFP'],
+                    tracts.loc[idx, 'COUNTYFP'],
+                    tracts.loc[idx, 'TRACTCE'],
+                )[0]
+                for var_name in acs_variable_names:
+                    tracts.loc[idx, var_name] = vals[var_name]
+    
+
     return tracts
 
 
@@ -74,6 +126,7 @@ cyclist_distribution = {
     'bike_lts0': 0.31,  #will not bike
 } # higher number = greater willingness to cycle in more challenging environments
 
+
 def create_userclasses(tracts: gpd.GeoDataFrame,
                               num_income_bins: int = 4,
                               save_to: str = "",
@@ -100,27 +153,22 @@ def create_userclasses(tracts: gpd.GeoDataFrame,
         get_acs_data_for_tracts(tracts)
     income_bin_edges = identify_bins(tracts, num_income_bins)
 
-    user_classes = pd.DataFrame(columns=[
-        'max_income',
-        'max_bicycle',
-        'car_owner',
-        'user_class_id',
-    ])
-    #find all permutations of relevant variables
-    #TODO - replace with a more pythonic function, there must be one in a std lib
-    for max_income in income_bin_edges[1:]:
-        for max_bicycle in cyclist_distribution.keys():
-            for car_owner in ["car","nocar"]:
-                next_idx = user_classes.shape[0] + 1
-                user_class_id = f'{round(max_income)}_{max_bicycle[5:]}_{car_owner}'
-                row_data = {
-                    'max_income': max_income,
-                    'max_bicycle': max_bicycle,
-                    'car_owner': car_owner,
-                    'user_class_id': user_class_id,
-                }
-                user_classes.loc[next_idx] = row_data
-
+    # Build list of all user class combinations
+    rows = []
+    for max_income, max_bicycle, car_owner in product(
+        income_bin_edges[1:],
+        cyclist_distribution.keys(),
+        ["car", "nocar"]
+    ):
+        user_class_id = f'{round(max_income)}_{max_bicycle[5:]}_{car_owner}'
+        rows.append({
+            'max_income': max_income,
+            'max_bicycle': max_bicycle,
+            'car_owner': car_owner,
+            'user_class_id': user_class_id,
+        })
+    
+    user_classes = pd.DataFrame(rows)
     user_classes.index = user_classes.user_class_id.values
 
     if save_to:
@@ -152,14 +200,15 @@ def create_userclass_statistics(
     tracts_mw = tracts.to_crs('ESRI:54009')
     
     income_maxes = user_classes.max_income.unique()
+    
+    # Pre-build lookup dictionary for user_class_id to avoid repeated DataFrame filtering
+    user_class_lookup = {}
+    for _, row in user_classes.iterrows():
+        key = (row['max_income'], row['max_bicycle'], row['car_owner'])
+        user_class_lookup[key] = row['user_class_id']
 
-    userclass_stats = pd.DataFrame(columns=[
-        'geom_id',
-        'population',
-        'user_class_id',
-        'race',
-        'hispanic_or_latino',
-    ])
+    # Use list to accumulate rows instead of appending to DataFrame
+    userclass_stats_rows = []
 
     for tract_idx in tqdm(list(tracts.index)):
 
@@ -231,14 +280,11 @@ def create_userclass_statistics(
                             else:
                                 race_cycle_hisplat_car_pop = race_cycle_hisplat_pop * (1 - percent_with_car)
 
-                            user_class = user_classes[
-                                (user_classes['max_income'] == income_bin[0]) &
-                                (user_classes['max_bicycle'] == f'bike_lts{lts}') &
-                                (user_classes['car_owner'] == car_owner)]
-                            assert len(user_class["user_class_id"].unique()) == 1
-                            user_class_id = user_class["user_class_id"].unique()[0]
+                            # Use lookup dictionary instead of filtering DataFrame
+                            lookup_key = (income_bin[0], f'bike_lts{lts}', car_owner)
+                            user_class_id = user_class_lookup[lookup_key]
 
-                            userclass_stat = pd.Series({
+                            userclass_stats_rows.append({
                                 'geom_id': geom_id,
                                 'population': race_cycle_hisplat_car_pop,
                                 'user_class_id': user_class_id,
@@ -246,7 +292,10 @@ def create_userclass_statistics(
                                 'hispanic_or_latino': hisp_lat,
                                 'car_owner': car_owner,
                             })
-                            userclass_stats.loc[len(userclass_stats)] = userclass_stat
+    
+    # Create DataFrame once from all accumulated rows
+    userclass_stats = pd.DataFrame(userclass_stats_rows)
+    
     print(int(userclass_stats.population.sum()), tracts.B01003_001E.sum())
     tolerance=0.02
     totalpop_lower_bound = (1 - tolerance) * tracts.B01003_001E.sum()
@@ -259,6 +308,45 @@ def create_userclass_statistics(
         #TODO: test below code
 
     return userclass_stats
+
+
+def populate_people_usa(scenario_dir):
+
+    input_dir = f"{scenario_dir}/input_data/"
+    analysis_areas = gpd.read_file(f"{input_dir}/analysis_areas.gpkg")
+    analysis_areas.index = analysis_areas['geom_id'].values
+    if not os.path.exists(f"{input_dir}/user_classes.csv"):
+        num_income_bins = 4
+        print("establishing user classes")
+        user_classes = create_userclasses(
+            analysis_areas,
+            num_income_bins,
+            save_to = f"{input_dir}/user_classes.csv"
+        )
+    else:
+        print("loading user classes from disk")
+        user_classes = pd.read_csv(f"{input_dir}/user_classes.csv")
+        user_classes.index = user_classes.user_class_id.values
+        user_classes.fillna("",inplace=True)
+
+
+    if not os.path.exists(f"{input_dir}/userclass_statistics.csv"):
+        print("calculating user class statistics")
+        userclass_statistics = create_userclass_statistics(
+            analysis_areas,
+            user_classes,
+            save_to=f"{input_dir}/userclass_statistics.csv"
+        )
+
+    if not 'population_per_sqkm' in analysis_areas.columns:
+        print("calculating population per sqkm")
+        userclass_statistics = pd.read_csv(f"{input_dir}/userclass_statistics.csv")
+        population_by_geoid = userclass_statistics.groupby('geom_id')['population'].sum()
+
+        analysis_areas['census_total_pop'] = analysis_areas['geom_id'].astype(float).map(population_by_geoid)
+        analysis_areas['population_per_sqkm'] = analysis_areas['census_total_pop'] / (
+                    analysis_areas['area_sqm'] / 1000000)
+        analysis_areas.to_file(f"{input_dir}/analysis_areas.gpkg", driver="GPKG")
 
 
 GHS_FILENAME = 'GHS_POP_E2020_GLOBE_R2023A_54009_1000_V1_0.tif'
