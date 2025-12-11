@@ -210,7 +210,7 @@ def _process_tracts(tracts: gpd.GeoDataFrame,
         GeoDataFrame of processed tracts in WGS84 (EPSG:4326)
     """
     tracts['geom_id'] = tracts.index.astype(str)
-    
+
     # Remove water areas (need projected CRS for area calculation)
     if tracts.crs.is_geographic:
         tracts_proj = tracts.to_crs(tracts.estimate_utm_crs())
@@ -226,9 +226,10 @@ def _process_tracts(tracts: gpd.GeoDataFrame,
     # Convert to WGS84
     if tracts_filtered.crs != "EPSG:4326":
         tracts_filtered = tracts_filtered.to_crs("EPSG:4326")
-    
+
     if save_to:
         tracts_filtered.to_file(save_to)
+        logger.info(f"Saved tracts to {save_to}")
     
     return tracts_filtered
 
@@ -237,51 +238,100 @@ def _process_tracts(tracts: gpd.GeoDataFrame,
 # Public API Functions
 # ============================================================================
 
-def get_usa_tracts_from_address(
+def get_usa_tracts_from_location(
     states: list[str],
-    address: str,
     buffer: float = DEFAULT_BUFFER_DISTANCE,
-    year = 2022,
-    save_to: str = ""
+    year: int = 2022,
+    save_to: str = "",
+    address: str | None = None,
+    lat: float | None = None,
+    lon: float | None = None,
 ) -> gpd.GeoDataFrame:
-    """Get census tracts within a buffer distance of an address.
-    
+    """Get census tracts within a buffer distance of an address or lat/lon.
+
     Args:
         states: List of state abbreviations
-        address: Address to center the analysis area
+        address: Address to center the analysis area. Ignored if both ``lat`` and
+            ``lon`` are provided.
         buffer: Buffer distance in meters
+        year: Census year for tract boundaries
         save_to: Optional path to save the result
+        lat: Latitude in WGS84 (EPSG:4326). If provided with ``lon``, geocoding
+            is skipped and these coordinates are used directly.
+        lon: Longitude in WGS84 (EPSG:4326). If provided with ``lat``, geocoding
+            is skipped and these coordinates are used directly.
 
     Returns:
-        GeoDataFrame: Processed census tracts with water bodies removed in WGS84 (EPSG:4326)
+        GeoDataFrame: Processed census tracts with water bodies removed in
+        WGS84 (EPSG:4326)
+
+    Raises:
+        ValueError: If neither (lat, lon) nor a non-empty address is provided,
+            or if geocoding fails.
     """
-    # Geocode address
-    from geopy.geocoders import Nominatim
-    geolocator = Nominatim(user_agent="connectome")
-    location = geolocator.geocode(address)
-    
-    if location is None:
-        raise ValueError(f"Could not geocode address: {address}")
-    
+    # Determine point coordinates
+    if lat is not None and lon is not None:
+        # Use explicit coordinates, no external geocoding
+        point_lon, point_lat = float(lon), float(lat)
+        logger.info(
+            "Using provided lat/lon coordinates for tract selection: "
+            "lat=%s, lon=%s", point_lat, point_lon
+        )
+    else:
+        if not address:
+            raise ValueError(
+                "Either (lat, lon) must be provided, or a non-empty 'address' "
+                "string must be supplied."
+            )
+
+        # Geocode address
+        logger.info("Geocoding address for tract selection: %s", address)
+        from geopy.geocoders import Nominatim
+        from geopy.exc import GeocoderUnavailable, GeocoderTimedOut
+
+        geolocator = Nominatim(user_agent="connectome", timeout=5)
+        try:
+            location = geolocator.geocode(address)
+        except (GeocoderUnavailable, GeocoderTimedOut) as e:
+            raise RuntimeError(
+                f"Failed to geocode address '{address}': {e}. "
+                "If you already know the coordinates, call "
+                "get_usa_tracts_from_address(..., lat=..., lon=...) "
+                "to avoid external geocoding."
+            ) from e
+
+        if location is None:
+            raise ValueError(f"Could not geocode address: {address}")
+
+        point_lon, point_lat = float(location.longitude), float(location.latitude)
+        logger.info(
+            "Geocoded address '%s' to lat=%s, lon=%s",
+            address, point_lat, point_lon
+        )
+
     # Create point in WGS84 and buffer in projected CRS
     point = gpd.GeoDataFrame(
-        geometry=gpd.points_from_xy([location.longitude], [location.latitude]),
-        crs="EPSG:4326"
+        geometry=gpd.points_from_xy([point_lon], [point_lat]),
+        crs="EPSG:4326",
     )
-    
+
     # Project to UTM for accurate buffering
     point_proj = point.to_crs(point.estimate_utm_crs())
     buffered_proj = point_proj.buffer(buffer)
-    
+
     # Convert back to WGS84
     buffered_geom = gpd.GeoDataFrame(geometry=buffered_proj, crs=point_proj.crs)
     buffered_geom = buffered_geom.to_crs("EPSG:4326")
-    
+
     # Get tracts and filter
     tracts = _fetch_tracts_for_states(states, year=year)
     filtered = _filter_tracts_by_geometry(tracts, buffered_geom)
-    
-    return _process_tracts(filtered, save_to)
+
+    return _process_tracts(
+        filtered,
+        year=year,
+        save_to=save_to,
+    )
 
 
 def get_usa_tracts_from_polygon(
@@ -315,7 +365,7 @@ def get_usa_tracts_from_polygon(
     tracts = _filter_tracts_by_geometry(all_tracts, unified_polygon)
 
     # Process and return
-    tracts = _process_tracts(tracts, water_threshold, year, save_to)
+    tracts = _process_tracts(tracts, water_threshold, year, save_to=save_to)
 
     return tracts
 
@@ -360,7 +410,7 @@ def get_usa_tracts_from_state(
     all_tracts = _fetch_tracts_for_states(states, year, subset_by=None)
     
     # Process and return (adds geom_id, removes water, converts to WGS84)
-    tracts = _process_tracts(all_tracts, water_threshold, year, save_to)
+    tracts = _process_tracts(all_tracts, water_threshold, year, save_to=save_to)
     
     logger.info(f"Returned {len(tracts)} tracts for state(s): {states}")
     

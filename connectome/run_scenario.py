@@ -2,22 +2,28 @@ import os
 import pandas as pd
 import geopandas as gpd
 import PyQt6
-from pathlib import Path
-import argparse
 from pygris import states
+import shutil
 
 #assume we're running this from connectome/connectome/
 #in case we're just in connectome/ :
 if not os.path.exists('setup'):
     os.chdir('connectome/')
 
-from connectome.setup.physical_conditions import physical_conditions
+from setup.physical_conditions import physical_conditions
 from setup.populate_people_usa import populate_people_usa
 
-from setup.define_analysis_areas import (
-    get_usa_tracts_from_address,
+from setup.census_geometry_usa import (
+    get_usa_tracts_from_location,
     get_usa_tracts_from_state,
+    get_usa_tracts_from_polygon,
 )
+
+from setup.geography_utils import (
+    interpolate_tracts_to_tazs,
+    calculate_population_per_sqkm,
+)
+
 from setup.populate_destinations import populate_all_dests_USA, populate_destinations_overture_places
 
 from setup.define_valuations import generalize_destination_units
@@ -27,70 +33,107 @@ from evaluation import evaluate_scenario
 
 import communication
 
-# I removed the usage of argparse becuase it was preventing me from running this in the pycharm interactive shell
-# Can add it back later, but honestly I don't see anyone using this from the commandline for a while.
-
-    #parser = argparse.ArgumentParser()
-    # Set up arguments for testing each setup script - should be organized logically
-    # i.e. populate destinations + populate people should be run before valuations
-    # parser.add_argument('--address', type=str, default="26 University Pl, Burlington, VT 05405",
-    #                     help='Address for analysis area')
-    # parser.add_argument('--state', type=str, default="VT",
-    #                     help='State for analysis area')
-    #
-    # parser.add_argument('--run_dir', type=str, default="test_run_burlington",
-    #                     help = 'directory to store scenario files')
-    #
-    # parser.add_argument('--areas', help = 'run define_analysis_areas', action='store_true')
-    # parser.add_argument('--people', help = 'run populate_people_usa', action='store_true')
-    # parser.add_argument('--dests', help = 'run populate_destinations', action='store_true')
-    # parser.add_argument('--conditions', help = 'run physical_conditions', action='store_true')
-    # parser.add_argument('--valuations', help = 'run define_valuations', action='store_true')
-    # #parser.add_argument('--all', help = 'run all three setup steps', action='store_true')
-    # args = parser.parse_args()
-    #
-    # no_args = not any([args.areas, args.people, args.dests, args.conditions, args.valuations])
-
-#Parameters for testing
-# run_name = "burlington_test"
-# states = ["VT"]
-# address = "26 University Pl, Burlington, VT 05405"
-# buffer = 3000
-
 
 def run_scenario(scenario_dir,
                  states,
                  address = None,
-                 buffer = 10000, #m
+                 lat=None,
+                 lon=None,
+                 buffer = 30000, #m
+                 taz_file = None,
+                 traffic_datasource = None,
                 ):
 
     os.makedirs(f"{scenario_dir}/input_data", exist_ok=True)
     input_dir = f'{scenario_dir}/input_data'
 
-    # get analysis areas
-    if not os.path.exists(f"{input_dir}/analysis_areas.gpkg"):
-
+    # get census tracts
+    os.makedirs(f"{input_dir}/census", exist_ok=True)
+    if not os.path.exists(f"{input_dir}/census/census_tracts.gpkg"):
         if address is not None:
             print(f"fetching census tracts from {address} with buffer {buffer}m")
-            analysis_areas = get_usa_tracts_from_address(
+            census_tracts = get_usa_tracts_from_location(
                 states=states,
+                buffer=buffer,
+                save_to = f"{input_dir}/census/census_tracts.gpkg",
                 address=address,
-                buffer_dist=buffer,
-                save_to = f"{input_dir}/analysis_areas.gpkg"
+            )
+        if (lat is not None) and (lon is not None):
+            print(f"fetching census tracts from {address} with buffer {buffer}m")
+            census_tracts = get_usa_tracts_from_location(
+                states=states,
+                buffer=buffer,
+                save_to = f"{input_dir}/census/census_tracts.gpkg",
+                lat=lat,
+                lon=lon,
+            )
+        elif taz_file is not None:
+            print(f"fetching census tracts from polygon {taz_file}")
+            census_tracts = get_usa_tracts_from_polygon(
+                states=states,
+                polygon=taz_file,
+                save_to=f"{input_dir}/census/census_tracts.gpkg",
             )
         else:
             print(f"fetching census tracts from {states} at the state level")
 
-            analysis_areas = get_usa_tracts_from_state(
+            census_tracts = get_usa_tracts_from_state(
                 states=['RI'],
-                save_to = f"{input_dir}/analysis_areas.gpkg"
+                save_to = f"{input_dir}/census/census_tracts.gpkg"
             )
     else:
         # print("loading tracts from disk")
-        analysis_areas = gpd.read_file(f"{input_dir}/analysis_areas.gpkg",index_col=0)
+        census_tracts = gpd.read_file(f"{input_dir}/census/census_tracts.gpkg",index_col=0)
 
     #get tract info
     populate_people_usa(scenario_dir)
+
+    # get destinations
+    # For now, we're going to get destinations at the tract level BEFORE we interpolate to TAZs,
+    # because LODES jobs are at the tract level,
+    # so that we can use the same interpolation for destinations
+
+    if not os.path.exists(f"{input_dir}/census/census_tracts_with_dests.gpkg"):
+        print("populating overture destinations")
+        tracts_with_dests = populate_all_dests_USA(
+            geographies=census_tracts,
+            states=states,
+            already_tracts=True,
+            save_to=f"{input_dir}/census/census_tracts_with_dests.gpkg"
+        )
+    else:
+        print("loading destinations from disk")
+        analysis_areas = gpd.read_file(f"{input_dir}/census/census_tracts_with_dests.gpkg")
+        analysis_areas.index = analysis_areas['geom_id'].values
+
+    # determine analysis areas
+    # if we're using census tracts as the TAZs, copy them directly
+    # if we have TAZs already, MAUP interpolate to them
+    ### TODO: Base ratios off of tracts, but population numbers off of blocks
+
+    if taz_file is None: #assume we're using tracts
+        shutil.copyfile(f"{input_dir}/census/census_tracts_with_dests.gpkg", f"{input_dir}/analysis_areas.gpkg")
+        shutil.copyfile(f"{input_dir}/census/tract_userclass_statistics.csv", f"{input_dir}/userclass_statistics.csv")
+    else: #we're using some kind of TAZs
+        #check if we've already done this interpolation
+        if os.path.exists(f"{input_dir}/analysis_areas.gpkg") and os.path.exists(
+                f"{input_dir}/userclass_statistics.csv"):
+            print("loading analysis areas from disk (assuming they're already TAZs)")
+        else:
+            print("interpolating tracts to TAZs")
+            interpolate_tracts_to_tazs(
+                tracts=f"{input_dir}/census/census_tracts_with_dests.gpkg",
+                tazs=taz_file,
+                userclass_statistics=f"{input_dir}/census/tract_userclass_statistics.csv",
+                taz_id_col="geom_id",
+                create_taz_id_col=True,
+                source_geom_id_col="geom_id",
+                save_userclass_csv_to=f"{input_dir}/userclass_statistics.csv",
+                save_analysis_areas_gpkg_to=f"{input_dir}/analysis_areas.gpkg",
+                interpolate_tract_cols=['overture_places','lodes_jobs']
+            )
+
+    calculate_population_per_sqkm(input_dir)
 
     #load results of getting tract info (need to reload analysis areas because we've added population density)
     userclass_statistics = pd.read_csv(f"{input_dir}/userclass_statistics.csv")
@@ -100,39 +143,22 @@ def run_scenario(scenario_dir,
     analysis_areas = gpd.read_file(f"{input_dir}/analysis_areas.gpkg")
     analysis_areas.index = analysis_areas['geom_id'].values
 
-    #get destinations
-    if not 'lodes_jobs' in analysis_areas.columns:
-        print("populating overture destinations")
-        analysis_areas = populate_all_dests_USA(
-            geographies = analysis_areas,
-            states = states,
-            already_tracts = True,
-            save_to = f"{input_dir}/analysis_areas.gpkg"
-        )
-    else:
-        print("loading destinations from disk")
-        analysis_areas = gpd.read_file(f"{input_dir}/analysis_areas.gpkg")
-        analysis_areas.index = analysis_areas['geom_id'].values
 
-    #get physical conditions
+
+    # get physical conditions
+    # includes its own has-this-already-been-run checks
     physical_conditions(scenario_dir,
-                        get_mapbox_traffic_benchmarks=True,
-                        num_traffic_groups=10,
-                        sample_count_per_traffic_group=3)
+                        traffic_datasource = traffic_datasource)
 
     if not os.path.exists(f"{scenario_dir}/routing/user_classes_with_routeenvs.csv"):
         print("defining experiences")
-        user_classes_w_routeenvs = apply_experience_defintions(f"{input_dir}/osm_study_area.pbf",
-                                    f"{input_dir}/GTFS/",
-                                                                 user_classes,
-                                   f"{scenario_dir}/routing/",
-                                   f"{scenario_dir}/routing/user_classes_with_routeenvs.csv"
-                                                                 )
+        user_classes_w_routeenvs = apply_experience_defintions(input_dir, scenario_dir)
+
     else:
         print("loading experiences")
         user_classes_w_routeenvs = pd.read_csv(f"{scenario_dir}/routing/user_classes_with_routeenvs.csv")
-        user_classes_w_routeenvs.index = user_classes_w_routeenvs.user_class_id.values
-        user_classes_w_routeenvs.fillna("", inplace=True)
+    user_classes_w_routeenvs.index = user_classes_w_routeenvs.user_class_id.values
+    user_classes_w_routeenvs.fillna("", inplace=True)
 
     if not os.path.exists(f"{scenario_dir}/impedances"):
         print("routing")
@@ -158,8 +184,14 @@ def run_scenario(scenario_dir,
 
 if __name__ == "__main__":
     run_scenario(
-        scenario_dir = "testing/ri_test/existing_conditions",
-        states = ["RI"],
-        address = None
+        scenario_dir = "testing/lewes/existing_conditions",
+        states = ["DE"],
+        lat=38.7710985,
+        lon=-75.141997,
+        buffer = 9000,
+        traffic_datasource = "tomtom",
+        #scenario_dir = "testing/denver/existing_conditions",
+        #states = ["CO"],
+        #taz_file = "testing/denver/taz.geojson"
     )
     #communication.compare_scenarios("testing/ri_test", "existing_conditions", "regional_rail")

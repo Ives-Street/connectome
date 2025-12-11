@@ -13,7 +13,6 @@ MODES = [
     #"SHARED_BICYCLE",
 ]
 
-
 class SimplestLTSAdder(osmium.SimpleHandler):
     def __init__(self, writer, max_lts):
         osmium.SimpleHandler.__init__(self)
@@ -129,34 +128,37 @@ def add_lts_tags(osm_filename: str, out_filename: str, max_lts: int = 3) -> None
     ltsadder.apply_file(osm_filename)
     print(f'With max_lts {max_lts}, added lts=1,2, or 3 to {ltsadder.n_modified_ways}')
 
-
-def define_experiences(input_osm_filename: str,
-                       input_gtfs_dir: str,
-                       user_classes: pd.DataFrame,
-                       destination_dir: str,
-                       save_userclasses_to: str,
-                       ) -> pd.DataFrame:
+def define_experiences(input_dir, scenario_dir) -> pd.DataFrame:
     """
     Creates a new directory "routing environment" with OSM/GTFS files reflecting conditions as experienced
     by each combination of user class and mode
     Also assign each class/mode combination to a routing environment.
-    Args:
-        input_osm_filename:
-        input_gtfs_dir:
-        user_classes:
-        destination_dir:
     """
+
+    input_osm_filename = f"{input_dir}/osm_study_area.pbf"
+    input_gtfs_dir = f"{input_dir}/GTFS/"
+    input_traffic_dir = f"{input_dir}/traffic/"
+    user_classes = pd.read_csv(f"{input_dir}/user_classes.csv")
+    destination_dir = f"{scenario_dir}/routing/"
+    save_userclasses_to = f"{scenario_dir}/routing/user_classes_with_routeenvs.csv"
+
     os.makedirs(destination_dir, exist_ok=True)
 
     # for now, we're going to assume the most basic version possible:
     # all subgroups experience the city the same way for CAR, TRANSIT, and WALK,
     # and there are only four different options for BIKE
+
+    # TODO - this is where we'll have to adjust link-level driving impedances for toll roads
+
     universal_routing_env_id = "universal_re"
-    # first let's do CAR, TRANSIT, and WALK: 1) make the directory
+    # first let's do CAR, TRANSIT, and WALK:
+    # 1) make the directory
     os.makedirs(f"{destination_dir}/{universal_routing_env_id}", exist_ok=True)
-    # 2) copy the GTFS and OSM
+    # 2) copy the osm, traffic, and gtfs files
     shutil.copy(input_osm_filename,f"{destination_dir}/{universal_routing_env_id}/osm_file.pbf")
-    shutil.copytree(input_gtfs_dir, f"{destination_dir}/{universal_routing_env_id}/gtfs_files/",dirs_exist_ok=True)
+    shutil.copytree(input_traffic_dir, f"{destination_dir}/{universal_routing_env_id}/traffic/",dirs_exist_ok=True)
+    shutil.copytree(input_gtfs_dir, f"{destination_dir}/{universal_routing_env_id}/gtfs_files/", dirs_exist_ok=True)
+
     # 3) create a parameters file for r5 routing
     r5_params = {
     }
@@ -193,6 +195,7 @@ def define_experiences(input_osm_filename: str,
             json.dump(r5_params, f)
 
         # 4) assign IDs
+
         selector = user_classes['max_bicycle'] == f'bike_lts{lts}'
         user_classes.loc[selector, "routeenv_BICYCLE"] = bike_env_id
     if not save_userclasses_to == "":

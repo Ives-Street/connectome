@@ -313,13 +313,13 @@ def create_userclass_statistics(
 def populate_people_usa(scenario_dir):
 
     input_dir = f"{scenario_dir}/input_data/"
-    analysis_areas = gpd.read_file(f"{input_dir}/analysis_areas.gpkg")
-    analysis_areas.index = analysis_areas['geom_id'].values
+    tracts = gpd.read_file(f"{input_dir}census/census_tracts.gpkg")
+    tracts.index = tracts['geom_id'].values
     if not os.path.exists(f"{input_dir}/user_classes.csv"):
         num_income_bins = 4
         print("establishing user classes")
         user_classes = create_userclasses(
-            analysis_areas,
+            tracts,
             num_income_bins,
             save_to = f"{input_dir}/user_classes.csv"
         )
@@ -333,98 +333,9 @@ def populate_people_usa(scenario_dir):
     if not os.path.exists(f"{input_dir}/userclass_statistics.csv"):
         print("calculating user class statistics")
         userclass_statistics = create_userclass_statistics(
-            analysis_areas,
+            tracts,
             user_classes,
-            save_to=f"{input_dir}/userclass_statistics.csv"
+            save_to=f"{input_dir}/census/tract_userclass_statistics.csv"
         )
 
-    if not 'population_per_sqkm' in analysis_areas.columns:
-        print("calculating population per sqkm")
-        userclass_statistics = pd.read_csv(f"{input_dir}/userclass_statistics.csv")
-        population_by_geoid = userclass_statistics.groupby('geom_id')['population'].sum()
 
-        analysis_areas['census_total_pop'] = analysis_areas['geom_id'].astype(float).map(population_by_geoid)
-        analysis_areas['population_per_sqkm'] = analysis_areas['census_total_pop'] / (
-                    analysis_areas['area_sqm'] / 1000000)
-        analysis_areas.to_file(f"{input_dir}/analysis_areas.gpkg", driver="GPKG")
-
-
-GHS_FILENAME = 'GHS_POP_E2020_GLOBE_R2023A_54009_1000_V1_0.tif'
-
-
-#TODO divide into two functions? Create grid, and then populate based on census data?
-#TODO use hexagons instead of grid?
-def divide_tracts_to_grid(tracts,
-                          sub_demos,
-                          grid_size=1000,
-                          min_pop=10,
-                          save_patches='existing_conditions/population_geometry.gpkg',
-                          save_subdemos='existing_conditions/subdemos.csv',
-                          ):
-    #divide the tracts into patches
-    tracts_utm = ox.projection.project_gdf(tracts)
-    tracts_mw = tracts.to_crs('ESRI:54009')
-    patches = make_patches(tracts,
-                           tracts_utm.crs,
-                           patch_length=grid_size,
-                           buffer=0)[0]
-    patches_utm = ox.projection.project_gdf(patches)
-    patches['area_sqm'] = patches_utm.area
-    patches_mw = patches.to_crs('ESRI:54009')
-    for idx in patches.index:
-        x = rasterstats.zonal_stats(
-            patches_mw.loc[idx, 'geometry'],
-            GHS_FILENAME,
-            stats=['mean'],
-            all_touched=True
-        )
-        assert len(x) == 1
-        pop_per_km2 = x[0]['mean']
-        print(pop_per_km2)
-        total_pop = pop_per_km2 * (patches.loc[idx, 'area_sqm'] / 1000000)
-        patches.loc[idx, 'population'] = total_pop
-
-        if total_pop > min_pop:
-            #find 'parent' tract ID
-            patch_reppoint = patches.loc[idx, 'geometry'].representative_point()
-            try:
-                parent_id = tracts[tracts.contains(patch_reppoint)].index[0]
-            except:
-                import pdb;
-                pdb.set_trace()
-            patches.loc[idx, 'parent_id'] = parent_id
-
-    patches = patches[patches.population > min_pop]  #todo reindex?
-
-    #find all the patches within each tract
-    #and get the total "ghsl population" within each tract
-    #because we're now using two different sources of population
-    #and this will be the denominator when we divide the subgroups
-    for tract_idx in tracts.index:
-        select_within = patches.representative_point().within(
-            tracts.loc[tract_idx, 'geometry'])
-        #tracts.loc[tract_idx, 'children'] = select_within.index not working, trying something else.
-        total_ghs_pop = patches[select_within].population.sum()
-        tracts.loc[tract_idx, 'total_ghs_pop'] = total_ghs_pop
-
-    #divide the subgroups
-    new_subdemos = []
-    for p_idx in tqdm(list(patches.index)):
-        parent_id = patches.loc[p_idx, 'parent_id']
-        parent_pop = tracts.loc[parent_id, 'total_ghs_pop']
-        fraction_of_parent_pop = patches.loc[p_idx, 'population'] / parent_pop
-        copied_subdemos = sub_demos[sub_demos.geom_id == parent_id].copy()
-        copied_subdemos.geom_id = p_idx
-        copied_subdemos.population = copied_subdemos.population * fraction_of_parent_pop
-        new_subdemos.append(copied_subdemos)
-    out_subdemos = pd.concat(new_subdemos)
-
-    if not save_patches == False:
-        patches.to_file(save_patches, driver='gpkg')
-
-    if not save_subdemos == False:
-        out_subdemos.to_csv(save_subdemos)
-
-    return patches, out_subdemos
-
-#test adding new line in Cursor

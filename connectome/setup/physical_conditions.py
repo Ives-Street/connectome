@@ -18,6 +18,7 @@ import zipfile
 import tempfile
 import shutil
 
+from setup.tomtom_conflation import conflate_tomtom_to_osm
 
 os.environ['MOBILITY_API_REFRESH_TOKEN'] = open("mobility_db_refresh_token.txt").read().rstrip("\n")
 os.environ['MAPBOX_TOKEN'] = open("mapbox_token.txt").read().rstrip("\n")
@@ -334,7 +335,7 @@ def get_GTFS_from_mobility_database(
     print("Download complete")
 
 
-
+### Google Maps based traffic tools ###
 
 def groupings_for_traffic_estimates(analysis_areas: gpd.GeoDataFrame, number_groups: int) -> gpd.GeoDataFrame:
     """Creates population-balanced groupings of analysis areas based on density and contiguity.
@@ -360,8 +361,19 @@ def groupings_for_traffic_estimates(analysis_areas: gpd.GeoDataFrame, number_gro
 
     while len(remaining_areas) > 0 and current_group < number_groups:
         # Find area with highest density that isn't grouped yet
-        densities = analysis_areas.loc[list(remaining_areas)]['population_per_sqkm']
-        seed_area = densities.idxmax()
+        # 1) Restrict to remaining areas
+        densities = analysis_areas.loc[list(remaining_areas), 'population_per_sqkm']
+
+        # 2) Coerce to numeric and drop NULL/non-numeric values from contention
+        densities_numeric = pd.to_numeric(densities, errors='coerce').dropna()
+
+        if densities_numeric.empty:
+            raise ValueError(
+                "No remaining areas with valid numeric 'population_per_sqkm' to use as a seed "
+                "(e.g., only NULL-density tracts like parks/airports are left)."
+            )
+
+        seed_area = densities_numeric.idxmax()
 
         # Start new group with this seed area
         analysis_areas.loc[seed_area, 'traffic_group'] = current_group
@@ -435,7 +447,7 @@ def groupings_for_traffic_estimates(analysis_areas: gpd.GeoDataFrame, number_gro
             group_centroids = {}
             for group in range(current_group):
                 group_geoms = analysis_areas[analysis_areas['traffic_group'] == group]
-                group_centroids[group] = group_geoms.geometry.unary_union.centroid
+                group_centroids[group] = group_geoms.geometry.union_all().centroid
 
             # Find closest group by checking adjacent polygons
             current_area_geom = analysis_areas.loc[area, 'geometry']
@@ -558,6 +570,8 @@ def get_next_wednesday_9am():
     next_wednesday = next_wednesday.replace(hour=9, minute=0, second=0, microsecond=0)
     return next_wednesday
 
+
+### Mapbox based traffic tools ###
 
 def benchmark_driving_times(analysis_areas: gpd.GeoDataFrame,
                            mapbox_token: str,
@@ -718,32 +732,17 @@ def benchmark_driving_times(analysis_areas: gpd.GeoDataFrame,
     
     return results_df
 
+### High level API function ###
+
+
 def physical_conditions(scenario_dir,
-                        get_mapbox_traffic_benchmarks=True,
-                        num_traffic_groups=7,
-                        sample_count_per_traffic_group=2):
+                        traffic_datasource = None, #None, "mapbox", or "tomtom"
+                        mapbox_num_traffic_groups=7,
+                        mapbox_sample_count_per_group=2,
+                        ):
     input_dir = f"{scenario_dir}/input_data/"
     analysis_areas = gpd.read_file(f"{input_dir}/analysis_areas.gpkg")
     analysis_areas.index = analysis_areas['geom_id'].values
-
-    # Add traffic groups and sample points
-    if get_mapbox_traffic_benchmarks:
-        if not os.path.exists(f"{input_dir}/traffic_sample_triptimes.csv"):
-            # First create traffic groups
-            analysis_areas = groupings_for_traffic_estimates(analysis_areas, num_traffic_groups)
-            # Then select sample points within each group
-            analysis_areas = select_traffic_samples_by_group(analysis_areas, sample_count_per_traffic_group)
-            # And call Mapbox for actual driving times
-            driving_times = benchmark_driving_times(analysis_areas,
-                                                    os.environ['MAPBOX_TOKEN'],
-                                                    f"{scenario_dir}/input_data/traffic_sample_triptimes.csv")
-
-        # Remove any existing index-related columns before saving
-        columns_to_drop = [col for col in analysis_areas.columns if col in ['level_0', 'index']]
-        if columns_to_drop:
-            analysis_areas = analysis_areas.drop(columns=columns_to_drop)
-        
-        analysis_areas.to_file(f"{input_dir}/analysis_areas.gpkg", driver="GPKG")
 
     # Get OSM data if it doesn't exist
     if not os.path.exists(f"{input_dir}/osm_study_area.pbf"):
@@ -756,6 +755,44 @@ def physical_conditions(scenario_dir,
             buffer_dist=500,
         )
         make_osm_editable(f"{input_dir}/osm_study_area.pbf", f"{input_dir}/osm_study_area_editable.osm")
+
+    if traffic_datasource == "mapbox": #TODO remove/deprecate? this is unfinished, it doesn't actually save the driving times. But that's okay, I'm using tomtom now.
+        if not os.path.exists(f"{input_dir}/traffic_sample_triptimes.csv"):
+            # First create traffic groups
+            analysis_areas = groupings_for_traffic_estimates(analysis_areas, mapbox_num_traffic_groups)
+            # Then select sample points within each group
+            analysis_areas = select_traffic_samples_by_group(analysis_areas, mapbox_sample_count_per_group)
+
+            # And call Mapbox for actual driving times
+            driving_times = benchmark_driving_times(analysis_areas,
+                                                    os.environ['MAPBOX_TOKEN'],
+                                                    f"{scenario_dir}/input_data/traffic_sample_triptimes.csv")
+
+        # Remove any existing index-related columns before saving
+        columns_to_drop = [col for col in analysis_areas.columns if col in ['level_0', 'index']]
+        if columns_to_drop:
+            analysis_areas = analysis_areas.drop(columns=columns_to_drop)
+
+        analysis_areas.to_file(f"{input_dir}/analysis_areas.gpkg", driver="GPKG")
+
+    #todo consider function calls here to interpolate capacities and volumes?
+
+    elif traffic_datasource == "tomtom":
+        if not (os.path.exists(f"{input_dir}/tomtom/tomtom_geom.geojson") and
+             os.path.exists(f"{input_dir}/tomtom/tomtom_speeds.json")):
+            raise FileNotFoundError(f"Tomtom input data not found in {input_dir}/tomtom/tomtom_geom.geojson and tomtom_speeds.json. Please download.")
+        os.makedirs(f"{input_dir}/traffic/", exist_ok=True)
+
+        if not os.path.exists(f"{input_dir}/traffic/graph_with_speeds.graphml"):
+            conflate_tomtom_to_osm(
+               f"{input_dir}/osm_study_area_editable.osm",
+                f"{input_dir}/tomtom/tomtom_speeds.json",
+                f"{input_dir}/tomtom/tomtom_geom.geojson",
+                debug_gpkg_prefix = f"{input_dir}/tomtom/debug",
+                save_graphml_to = f"{input_dir}/traffic/graph_with_speeds.graphml",
+                save_nodes_to = f"{input_dir}/traffic/nodes.gpkg",
+                save_edges_to = f"{input_dir}/traffic/edges.gpkg",
+            )
 
     # Get GTFS data if it doesn't exist
     if (

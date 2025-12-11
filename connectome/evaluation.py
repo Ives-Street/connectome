@@ -105,18 +105,51 @@ def choose_modes_for_userclasses(userclass_gtms):
             import pdb; pdb.set_trace()
             raise ValueError("Input dictionary cannot be empty")
 
-        # Initialize with first mode's values
-        first_mode = list(impedance_matrices_by_mode.keys())[0]
+        # --- Harmonize indices/columns across all modes for this userclass ---
+        # Collect all DataFrames
+        mode_names = list(impedance_matrices_by_mode.keys())
+        matrices = [impedance_matrices_by_mode[m] for m in mode_names]
+
+        # Compute common index and columns
+        common_index = matrices[0].index
+        common_cols = matrices[0].columns
+        for mat in matrices[1:]:
+            common_index = common_index.intersection(mat.index)
+            common_cols = common_cols.intersection(mat.columns)
+
+        if len(common_index) == 0 or len(common_cols) == 0:
+            raise ValueError(
+                f"For userclass '{userclass}', impedance matrices have no overlapping "
+                f"origins or destinations across modes. Check that all gtm_*.csv "
+                f"files for this userclass share a consistent set of geom_ids."
+            )
+
+        # Reindex all matrices to the common O/D set (order and labels now identical)
+        for mode in mode_names:
+            impedance_matrices_by_mode[mode] = impedance_matrices_by_mode[mode].reindex(
+                index=common_index,
+                columns=common_cols,
+            )
+
+        # Initialize with first mode's values (after reindexing)
+        first_mode = mode_names[0]
         lowest_traveltimes = impedance_matrices_by_mode[first_mode].copy()
-        mode_selections = pd.DataFrame(first_mode, index=lowest_traveltimes.index, columns=lowest_traveltimes.columns)
+        mode_selections = pd.DataFrame(
+            first_mode,
+            index=lowest_traveltimes.index,
+            columns=lowest_traveltimes.columns,
+        )
 
         # Compare with other modes
         for mode, matrix in impedance_matrices_by_mode.items():
+            # All matrices now have identical index/columns, so this comparison is valid
             mask = matrix < lowest_traveltimes
             lowest_traveltimes = lowest_traveltimes.where(~mask, matrix)
             mode_selections = mode_selections.where(~mask, mode)
+
         lowest_traveltimes_by_userclass[userclass] = lowest_traveltimes
         mode_selections_by_userclass[userclass] = mode_selections
+
     return lowest_traveltimes_by_userclass, mode_selections_by_userclass
 
 def value_per_destination_unit(minute_equivalents) -> float:
@@ -299,6 +332,7 @@ def evaluate_scenario(scenario_dir, user_classes, userclass_statistics, geometry
 
     #get population by geom_id and userclass
     population_by_geom_and_userclass = get_population_by_geom_and_userclass(geometry_and_dests, userclass_statistics)
+
 
     #get traveltimes and mode selections for each userclass
     (
