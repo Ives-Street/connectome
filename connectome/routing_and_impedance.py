@@ -13,7 +13,7 @@ import datetime
 import geopandas as gpd
 from tqdm import tqdm
 import fiona
-from shapely.geometry import shape
+from shapely.geometry import LineString
 
 import communication
 import logging
@@ -31,7 +31,262 @@ MODES = [ #todo - make this universal for the whole codebase
 DEPARTURE_TIME = datetime.datetime.now().replace(hour=9, minute=0, second=0) + datetime.timedelta(
     days=(1 - datetime.datetime.now().weekday() + 7) % 7 + (1 if datetime.datetime.now().weekday() >= 3 else 0))
 
-def nx_route_environment(routeenv, mode, scenario_dir, rep_points, departure_time):
+
+def nx_route_environment(
+    routeenv,
+    mode,
+    scenario_dir,
+    rep_points,
+    departure_time,
+    save_paths: str = 'parquet',
+    visualize_routes: bool | list = True,
+):
+    """
+    Load a GraphML network and compute an all-to-all travel-time matrix between rep_points.
+    Optionally also save the traversed edges (u, v, key) for each O/D shortest path.
+
+    Parameters
+    ----------
+    routeenv : str
+        Name of the routing environment (e.g., scenario name).
+    mode : str
+        Travel mode identifier (used in filenames).
+    scenario_dir : str
+        Base directory for this scenario.
+    rep_points : geopandas.GeoDataFrame
+        Representative points with an 'id' column and point geometries.
+    departure_time : any
+        Currently unused, but kept for API compatibility.
+    save_paths : str, optional
+        Format to save path data: 'csv', 'parquet', or None. By default 'parquet'.
+    visualize_routes : bool or sequence, optional
+        If False (default): no visualizations.
+        If True: visualize all origins.
+        If sequence: visualize routes for the listed origin_ids.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Wide matrix of travel times in minutes between rep_points (ids as index/columns).
+    """
+
+    raw_ttm_filename = f"{scenario_dir}/routing/{routeenv}/raw_ttms/raw_ttm_{mode}.csv"
+    paths_parquet_filename = (
+        f"{scenario_dir}/routing/{routeenv}/paths/paths_{mode}.parquet"
+    )
+    paths_csv_filename = (
+        f"{scenario_dir}/routing/{routeenv}/paths/paths_{mode}.csv"
+    )
+
+    # Return cached TTM if it exists (paths are not re-used here; they are diagnostic)
+    if os.path.exists(raw_ttm_filename):
+        logger.info(
+            "Found cached raw TTM for routeenv='%s', mode='%s' at '%s'",
+            routeenv,
+            mode,
+            raw_ttm_filename,
+        )
+        logger.debug("Loading cached TTM from CSV")
+        ttm_wide = pd.read_csv(raw_ttm_filename, index_col=0)
+        ttm_wide.index = ttm_wide.index.astype(str)
+        ttm_wide.columns = ttm_wide.columns.astype(str)
+        logger.debug("Loaded cached TTM with shape %s", ttm_wide.shape)
+        return ttm_wide
+
+    # 1. Load graph
+    G = ox.load_graphml(
+        f"{scenario_dir}/routing/{routeenv}/traffic/routing_graph.graphml"
+    )
+
+    # 2. Determine weight attribute
+    weight_attr = "traversal_time_sec"
+
+    # Ensure the weight attribute is numeric on all edges
+    bad_weight_count = 0
+    missing_weight_count = 0
+    for u, v, k, data in G.edges(keys=True, data=True):
+        if weight_attr not in data:
+            missing_weight_count += 1
+            # Treat missing weight as "impassable" for routing
+            data[weight_attr] = float("inf")
+            continue
+        val = data[weight_attr]
+        # Coerce to float if it's not already a clean number
+        try:
+            if not isinstance(val, (int, float)):
+                data[weight_attr] = float(val)
+        except (TypeError, ValueError):
+            bad_weight_count += 1
+            # If we cannot parse it, make the edge effectively unusable
+            data[weight_attr] = float("inf")
+
+    if bad_weight_count or missing_weight_count:
+        logger.warning(
+            "nx_route_environment: sanitized '%s' on %d edges (bad) and %d edges (missing) "
+            "in routeenv='%s', mode='%s'",
+            weight_attr,
+            bad_weight_count,
+            missing_weight_count,
+            routeenv,
+            mode,
+        )
+    else:
+        logger.debug(
+            "nx_route_environment: no bad or missing '%s' issues in routeenv='%s', mode='%s'",
+            weight_attr,
+            routeenv,
+            mode,
+        )
+
+    # 3. Snap rep_points (GeoDataFrame) to nearest graph nodes
+    logger.info("Snapping %d representative points to network nodes", len(rep_points))
+    if "id" not in rep_points.columns:
+        raise ValueError("rep_points must have an 'id' column.")
+
+    rep_ids = rep_points["id"].tolist()  # defines matrix order / labels
+
+    xs = rep_points.geometry.x.values
+    ys = rep_points.geometry.y.values
+
+    snapped_node_ids = ox.distance.nearest_nodes(G, xs, ys)
+    snapped_node_ids = list(map(int, snapped_node_ids))  # ensure Python ints
+    logger.debug("Snapped points to %d unique network nodes", len(set(snapped_node_ids)))
+
+    if len(snapped_node_ids) != len(rep_ids):
+        raise RuntimeError(
+            "Mismatch between number of rep_points IDs and snapped nodes."
+        )
+
+    n = len(rep_ids)
+    mat = np.full((n, n), np.nan, dtype=float)
+
+    # Storage for path records (only if save_paths is not None)
+    path_records = [] if save_paths in ['csv', 'parquet'] else None
+    if save_paths in ['csv', 'parquet']:
+        logger.info("Will save path records for each O/D pair")
+
+    # Helper to choose a specific edge key between (u, v)
+    def _choose_edge_key(u, v):
+        """
+        For a given (u, v) in a MultiDiGraph, choose the edge key that Dijkstra
+        would have used: the one with minimal weight_attr.
+        """
+        edge_dict = G[u][v]  # dict: key -> data
+        # Find key with minimum traversal_time_sec (default to inf if missing)
+        best_key = None
+        best_weight = float("inf")
+        for k, data in edge_dict.items():
+            w = data.get(weight_attr, float("inf"))
+            if w < best_weight:
+                best_weight = w
+                best_key = k
+        return best_key
+
+    # 4. Compute single-source shortest-path lengths (and paths) from each origin
+    logger.info("Computing shortest paths for %d origins", len(snapped_node_ids))
+    for i, orig in tqdm(enumerate(snapped_node_ids), total=len(snapped_node_ids),
+                        desc=f"Routing {mode}"):
+        # This returns a dict of distances, and a dict of node-paths 
+        lengths, paths_nodes = nx.single_source_dijkstra(
+            G, orig, weight=weight_attr
+        )
+
+        # Fill row i for all destinations and, if requested, build path records
+        for j, dest in enumerate(snapped_node_ids):
+            if dest not in lengths:
+                continue
+
+            mat[i, j] = lengths[dest]
+
+            if save_paths:
+                # Node path from origin to dest
+                node_path = paths_nodes.get(dest)
+                if not node_path or len(node_path) < 2:
+                    continue
+
+                # Convert node path into (u, v, key) sequence
+                for seq_idx in range(len(node_path) - 1):
+                    u = node_path[seq_idx]
+                    v = node_path[seq_idx + 1]
+                    try:
+                        key = _choose_edge_key(u, v)
+                    except KeyError:
+                        # No edge between u and v (shouldn't happen if path is valid)
+                        key = None
+
+                    if key is None:
+                        continue
+
+                    path_records.append(
+                        {
+                            "origin_id": rep_ids[i],
+                            "dest_id": rep_ids[j],
+                            "seq_idx": seq_idx,
+                            "u": int(u),
+                            "v": int(v),
+                            "key": key,
+                        }
+                    )
+
+    # 5. Build DataFrame for travel times (minutes)
+    tt_df = pd.DataFrame(mat, index=rep_ids, columns=rep_ids)
+    tt_df /= 60.0  # seconds -> minutes
+
+    # Ensure output directories exist
+    os.makedirs(f"{scenario_dir}/routing/{routeenv}/raw_ttms/", exist_ok=True)
+    if save_paths:
+        os.makedirs(f"{scenario_dir}/routing/{routeenv}/paths/", exist_ok=True)
+
+    # Save TTM
+    tt_df.to_csv(raw_ttm_filename)
+    logger.info(
+        "Saved raw TTM for routeenv='%s', mode='%s' to '%s'",
+        routeenv,
+        mode,
+        raw_ttm_filename,
+    )
+
+    # Save paths in requested format
+    if save_paths in ['csv', 'parquet'] and path_records:
+        paths_df = pd.DataFrame(path_records)
+        if save_paths == 'parquet':
+            paths_df.to_parquet(paths_parquet_filename, index=False)
+            output_file = paths_parquet_filename
+        else:  # save_paths == 'csv'
+            paths_df.to_csv(paths_csv_filename, index=False)
+            output_file = paths_csv_filename
+        logger.info(
+            "Saved O/D path edge sequences for routeenv='%s', mode='%s' to '%s'",
+            routeenv,
+            mode,
+            output_file,
+        )
+    elif save_paths in ['csv', 'parquet']:
+        logger.warning(
+            "save_paths='%s' but no path records were generated for routeenv='%s', mode='%s'",
+            save_paths,
+            routeenv,
+            mode,
+        )
+
+    # Visualizations (if requested and if we have paths)
+    if visualize_routes and paths_df is not None:
+        communication.visualize_origin_paths(
+            G=G,
+            paths_df=paths_df,
+            tt_df=tt_df,
+            rep_points=rep_points,
+            scenario_dir=scenario_dir,
+            routeenv=routeenv,
+            mode=mode,
+            visualize_routes=visualize_routes,
+            weight_attr=weight_attr,
+        )
+
+    return tt_df
+
+
+def nx_route_environment_OLD(routeenv, mode, scenario_dir, rep_points, departure_time):
     """
     Load a GraphML network and compute an all-to-all travel-time matrix between rep_points.
     # ... existing docstring ...
@@ -47,7 +302,7 @@ def nx_route_environment(routeenv, mode, scenario_dir, rep_points, departure_tim
         return ttm_wide
 
     # 1. Load graph
-    G = ox.load_graphml(f"{scenario_dir}/routing/{routeenv}/traffic/graph_with_speeds.graphml")
+    G = ox.load_graphml(f"{scenario_dir}/routing/{routeenv}/traffic/pre_benchmark/routing_graph.graphml")
 
     # 2. Determine weight attribute
     weight_attr = "traversal_time_sec"
@@ -262,10 +517,38 @@ def route_for_all_envs(scenario_dir: str,
                 logger.info("Creating visualization for mode='%s', routeenv='%s'", mode, routeenv)
                 communication.visualize_access_to_zone(scenario_dir,
                                                        geoms_with_dests,
-                                                       f"routing/{routeenv}/route_{mode}_raw_traveltime_viz.html",
+                                                       f"{scenario_dir}/routing/{routeenv}/route_{mode}_raw_traveltime_viz.html",
                                                        raw_ttm,
                                                        target_zone_id=None,
                                                        )
+
+###
+# routing support utils
+###
+
+def route_to_gdf_osmnx2(G, route, attrs=None):
+    """
+    Build a GeoDataFrame representing the edges in a node-based route.
+    Compatible with osmnx >= 2.0 (no get_route_edge_attributes).
+    """
+    records = []
+    for u, v in zip(route[:-1], route[1:]):
+        # MultiDiGraph: could have multiple parallel edges; choose the first
+        for key, data in G[u][v].items():
+            geom = data.get("geometry")
+            if geom is None:
+                # fallback: build straight-line geometry
+                xy1 = (G.nodes[u]["x"], G.nodes[u]["y"])
+                xy2 = (G.nodes[v]["x"], G.nodes[v]["y"])
+                geom = LineString([xy1, xy2])
+            rec = {"u": u, "v": v, "key": key, "geometry": geom}
+            if attrs:
+                for a in attrs:
+                    rec[a] = data.get(a)
+            records.append(rec)
+            break  # if multiple edges, just take first
+
+    return gpd.GeoDataFrame(records, geometry="geometry")
 
 ###
 # helper functions for impedance calculations
@@ -284,7 +567,7 @@ def parking_cost(ttm, geoms_with_dests):
     high_price_geomids = high_price_dests['geom_id'].values
 
     tcm.loc[:,mid_price_geomids] = 5 #5 dollars to park for the day in downtown Pawtucket, at Brown, and on Broadway
-    tcm.loc[:,high_price_geomids] = 15 #10 dollars to park for the day in downtown PVD
+    tcm.loc[:,high_price_geomids] = 15 #15 dollars to park for the day in downtown PVD
 
     return tcm
 

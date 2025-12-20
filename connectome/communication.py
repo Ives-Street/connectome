@@ -10,6 +10,14 @@ from folium.features import GeoJson, GeoJsonTooltip
 from folium.elements import MacroElement
 from jinja2 import Template
 import folium.plugins
+from shapely.geometry import LineString
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,              # or DEBUG
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 MODES = [ #todo - make this universal for the whole codebase
     "CAR",
@@ -19,71 +27,10 @@ MODES = [ #todo - make this universal for the whole codebase
     "RIDEHAIL",
 ]
 
-def visualize_access_to_zone(scenario_dir,
-                             geoms_with_dests,
-                             outpath,
-                             ttm,
-                             target_zone_id = None,
-                             ):
-    """Visualize access to a specific zone or to the zone with most destinations.
-    The target zone will be highlighted in red on the map.
 
-    Args:
-        geoms_with_dests: GeoDataFrame containing geometries and their destinations
-        ttm: Travel time matrix (wide, with from_id index and to_id columns) or a CSV path to it
-        target_zone_id: Target zone ID. If None, selects zone with most destinations
-    """
-    if target_zone_id is None:
-        #   right now only using lodes_jobs
-        total_dests = geoms_with_dests['lodes_jobs']
-        # Get the zone with maximum destinations
-        target_zone_id = total_dests.idxmax()
-
-    # Load wide TTM if a path is provided
-    if isinstance(ttm, str):
-        ttm = pd.read_csv(ttm, index_col=0)
-
-    # Ensure ids are strings for alignment with TTM
-    target_zone_id = str(target_zone_id)
-    # Some GeoDataFrames have geom_id as index; ensure it's also a column
-    if "geom_id" not in geoms_with_dests.columns:
-        geoms_with_dests = geoms_with_dests.copy()
-        geoms_with_dests["geom_id"] = geoms_with_dests.index.astype(str)
-    else:
-        geoms_with_dests = geoms_with_dests.copy()
-        geoms_with_dests["geom_id"] = geoms_with_dests["geom_id"].astype(str)
-
-    # Extract travel times to target zone (a Series indexed by from_id/geom_id)
-    if target_zone_id not in ttm.columns:
-        raise KeyError(f"Target zone id {target_zone_id} not found in travel time matrix columns.")
-    travel_times_to_dest = ttm[target_zone_id].copy()
-    travel_times_to_dest.index.name = 'geom_id'
-    travel_times_to_dest.name = 'travel_time_to_dest'
-
-    # Merge travel times into the GeoDataFrame
-    to_visualize = geoms_with_dests.merge(
-        travel_times_to_dest,
-        left_on="geom_id",
-        right_index=True,
-        how="left"
-    )
-
-    # Keep only the necessary columns
-    to_visualize = to_visualize[['geom_id', 'geometry', 'travel_time_to_dest']]
-
-    make_radio_choropleth_map(
-        scenario_dir=scenario_dir,
-        in_data=to_visualize,
-        outfile=outpath,
-        tiles="CartoDB.Positron",
-        tooltip_precision=0,
-    )
-
-    print(
-        f"Saved visualization of access to zone {target_zone_id} to {outpath}"
-    )
-
-
+# ============================================
+# Utility helpers for map creation and styling
+# ============================================
 
 def save_map_safely(m, out_path: str):
     print("saving map safely to", out_path)
@@ -199,7 +146,11 @@ def _coerce_and_prettify_numeric_columns(gdf: gpd.GeoDataFrame,
 
     return gdf, column_mapping
 
-#
+# ============================================
+# Interactive choropleth outputs (single scenario)
+# - Radio-button / dropdown selectable metrics
+# ============================================
+
 def make_radio_choropleth_map(
         scenario_dir: str,
         in_data: gpd.GeoDataFrame | str,
@@ -545,20 +496,315 @@ def make_radio_choropleth_map(
 
 
     if outfile:
-        outfile_path = os.path.join(scenario_dir, outfile)
-        os.makedirs(os.path.dirname(outfile_path), exist_ok=True)
-        m.save(outfile_path)
+        os.makedirs(os.path.dirname(outfile), exist_ok=True)
+        m.save(outfile)
 
 
     return m
 
 
-# ... existing code ...
+# ============================================
+# Single-scenario visualization
+# - Access to a specific zone
+# ============================================
+def visualize_access_to_zone(scenario_dir,
+                             geoms_with_dests,
+                             outpath,
+                             ttm,
+                             target_zone_id = None,
+                             ):
+    """Visualize access to a specific zone or to the zone with most destinations.
+    The target zone will be highlighted in red on the map.
+
+    Args:
+        geoms_with_dests: GeoDataFrame containing geometries and their destinations
+        ttm: Travel time matrix (wide, with from_id index and to_id columns) or a CSV path to it
+        target_zone_id: Target zone ID. If None, selects zone with most destinations
+    """
+    if target_zone_id is None:
+        #   right now only using lodes_jobs
+        total_dests = geoms_with_dests['lodes_jobs']
+        # Get the zone with maximum destinations
+        target_zone_id = total_dests.idxmax()
+
+    # Load wide TTM if a path is provided
+    if isinstance(ttm, str):
+        ttm = pd.read_csv(ttm, index_col=0)
+
+    # Ensure ids are strings for alignment with TTM
+    target_zone_id = str(target_zone_id)
+    # Some GeoDataFrames have geom_id as index; ensure it's also a column
+    if "geom_id" not in geoms_with_dests.columns:
+        geoms_with_dests = geoms_with_dests.copy()
+        geoms_with_dests["geom_id"] = geoms_with_dests.index.astype(str)
+    else:
+        geoms_with_dests = geoms_with_dests.copy()
+        geoms_with_dests["geom_id"] = geoms_with_dests["geom_id"].astype(str)
+
+    # Extract travel times to target zone (a Series indexed by from_id/geom_id)
+    if target_zone_id not in ttm.columns:
+        raise KeyError(f"Target zone id {target_zone_id} not found in travel time matrix columns.")
+    travel_times_to_dest = ttm[target_zone_id].copy()
+    travel_times_to_dest.index.name = 'geom_id'
+    travel_times_to_dest.name = 'travel_time_to_dest'
+
+    # Merge travel times into the GeoDataFrame
+    to_visualize = geoms_with_dests.merge(
+        travel_times_to_dest,
+        left_on="geom_id",
+        right_index=True,
+        how="left"
+    )
+
+    # Keep only the necessary columns
+    to_visualize = to_visualize[['geom_id', 'geometry', 'travel_time_to_dest']]
+
+    make_radio_choropleth_map(
+        scenario_dir=scenario_dir,
+        in_data=to_visualize,
+        outfile=outpath,
+        tiles="CartoDB.Positron",
+        tooltip_precision=0,
+    )
+
+    print(
+        f"Saved visualization of access to zone {target_zone_id} to {outpath}"
+    )
+
+
+
+# ============================================
+# Single-scenario and single-routeenv visualization
+# - O-D route visualization (currently driving-only)
+# ============================================
+
+def _choose_edge_key(G, u, v, weight_attr):
+    """
+    For a given (u, v) in a MultiDiGraph, choose the edge key that Dijkstra
+    would have used: the one with minimal weight_attr.
+    """
+    edge_dict = G[u][v]  # dict: key -> data
+    best_key = None
+    best_weight = float("inf")
+    for k, data in edge_dict.items():
+        w = data.get(weight_attr, float("inf"))
+        if w < best_weight:
+            best_weight = w
+            best_key = k
+    return best_key
+
+
+def visualize_origin_paths(
+    G,
+    paths_df,
+    tt_df,
+    rep_points,
+    scenario_dir,
+    routeenv,
+    mode,
+    visualize_routes: bool | list,
+    weight_attr="traversal_time_sec",
+):
+    """
+    Create GPKG + Folium HTML visualizations for selected origins.
+
+    Parameters
+    ----------
+    G : nx.MultiDiGraph
+        Routing graph with 'geometry' and optionally 'length' on edges.
+    paths_df : pandas.DataFrame
+        Long-format paths with columns: origin_id, dest_id, seq_idx, u, v, key.
+    tt_df : pandas.DataFrame
+        Travel-time matrix (minutes), indexed by origin_id with columns dest_id.
+    rep_points : geopandas.GeoDataFrame
+        Representative points with 'id' column and geometry in EPSG:4326.
+    scenario_dir, routeenv, mode : str
+        Used for output file paths.
+    visualize_routes : bool or sequence
+        If False: no visualizations.
+        If True: visualize all origins in tt_df.index.
+        If sequence: visualize only those origin_ids.
+    weight_attr : str
+        Name of time weight attribute (unused here, but kept for potential future use).
+    """
+    if not visualize_routes:
+        return
+
+    # Determine which origins to visualize
+    if visualize_routes is True:
+        origin_ids_to_vis = tt_df.index.tolist()
+    else:
+        origin_ids_to_vis = list(visualize_routes)
+
+    vis_dir = f"{scenario_dir}/routing/{routeenv}/paths/visualizations/"
+    os.makedirs(vis_dir, exist_ok=True)
+
+    # Simple lookup for rep_point geometries, in case we want them later
+    rep_geom_by_id = (
+        rep_points.set_index("id").geometry.to_dict()
+        if "id" in rep_points.columns
+        else {}
+    )
+
+    for origin_id in origin_ids_to_vis:
+        # Subset paths for this origin
+        origin_paths = paths_df[paths_df["origin_id"] == origin_id]
+        if origin_paths.empty:
+            logger.warning(
+                "No path records for origin_id='%s' in routeenv='%s', mode='%s'",
+                origin_id,
+                routeenv,
+                mode,
+            )
+            continue
+
+        route_rows = []
+
+        # Group by destination, reconstruct a LineString for each O/D path
+        for dest_id, group in origin_paths.groupby("dest_id"):
+            group_sorted = group.sort_values("seq_idx")
+
+            coords = []
+            total_length_m = 0.0
+            last_point = None
+
+            # Build geometry by concatenating edge geometries
+            for _, row in group_sorted.iterrows():
+                u = row["u"]
+                v = row["v"]
+                key = row["key"]
+
+                try:
+                    data = G[u][v][key]
+                except KeyError:
+                    logger.warning(
+                        "Missing edge (u=%s, v=%s, key=%s) in graph during visualization; skipping segment",
+                        u,
+                        v,
+                        key,
+                    )
+                    continue
+
+                geom = data.get("geometry", None)
+                if geom is None:
+                    # Fallback: straight line between node coords
+                    ux = G.nodes[u]["x"]
+                    uy = G.nodes[u]["y"]
+                    vx = G.nodes[v]["x"]
+                    vy = G.nodes[v]["y"]
+                    geom = LineString([(ux, uy), (vx, vy)])
+
+                # Append coords, avoiding duplicate vertex between consecutive segments
+                seg_coords = list(geom.coords)
+                if not seg_coords:
+                    continue
+                if not coords:
+                    coords.extend(seg_coords)
+                else:
+                    coords.extend(seg_coords[1:])
+
+                # Length in meters if available
+                seg_len = data.get("length", None)
+                if seg_len is not None:
+                    total_length_m += float(seg_len)
+
+            if len(coords) < 2:
+                # No usable geometry
+                continue
+
+            line = LineString(coords)
+
+            # Travel time from matrix (may be NaN for unreachable)
+            try:
+                travel_time_min = float(tt_df.loc[origin_id, dest_id])
+            except KeyError:
+                travel_time_min = float("nan")
+
+            route_rows.append(
+                {
+                    "origin_id": origin_id,
+                    "dest_id": dest_id,
+                    "travel_time_min": travel_time_min,
+                    "path_length_m": total_length_m if total_length_m > 0 else np.nan,
+                    "geometry": line,
+                }
+            )
+
+        if not route_rows:
+            logger.warning(
+                "No route geometries built for origin_id='%s' in routeenv='%s', mode='%s'",
+                origin_id,
+                routeenv,
+                mode,
+            )
+            continue
+
+        routes_gdf = gpd.GeoDataFrame(route_rows, geometry="geometry", crs="EPSG:4326")
+
+
+        # --- define save file locations ---
+        gpkg_path = vis_dir + f"origin_{origin_id}_routes_{mode}.gpkg"
+        html_path = vis_dir + f"origin_{origin_id}_routes_{mode}.html"
+
+        # --- Save GPKG ---
+        routes_gdf.to_file(gpkg_path, layer="routes", driver="GPKG")
+
+        # --- Build Folium map ---
+        minx, miny, maxx, maxy = routes_gdf.total_bounds
+        # fallback center if needed
+        center_lat = (miny + maxy) / 2.0
+        center_lon = (minx + maxx) / 2.0
+
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=12)
+        m.fit_bounds([[miny, minx], [maxy, maxx]])
+
+        # GeoJson with hover highlight
+        gj = folium.GeoJson(
+            data=routes_gdf.to_json(),
+            name="routes",
+            style_function=lambda feature: {
+                "color": "#3388ff",
+                "weight": 6,
+                "opacity": 0.6,
+            },
+            highlight_function=lambda feature: {
+                "color": "#ff0000",
+                "weight": 12,
+                "opacity": 1.0,
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=["dest_id", "travel_time_min", "path_length_m"],
+                aliases=[
+                    "Destination:",
+                    "Travel time (min):",
+                    "Path length (m):",
+                ],
+                sticky=False,
+            ),
+        )
+        gj.add_to(m)
+        folium.LayerControl().add_to(m)
+
+        m.save(html_path)
+
+        logger.info(
+            "Saved visualization for origin_id='%s' to '%s' and '%s'",
+            origin_id,
+            gpkg_path,
+            html_path,
+        )
+
+
+
+# ============================================
+# Scenario comparison visualizations
+# - Side-by-side or differential metrics
+# ============================================
 
 def compare_scenarios(
         study_dir: str,
-        scenario1_name: str = "Scenario 1",
-        scenario2_name: str = "Scenario 2",
+        scenario1_name: str,
+        scenario2_name: str,
         output_dir: str = None,
 ) -> tuple[pd.DataFrame, gpd.GeoDataFrame]:
     """
@@ -737,7 +983,7 @@ def compare_scenarios(
     make_radio_choropleth_map(
         scenario_dir=output_dir,
         in_data=geom_comparison,
-        outfile="value_comparison_map.html",
+        outfile=os.path.join(output_dir,"value_comparison_map.html"),
         columns_to_viz=value_cols,
     )
 
@@ -752,7 +998,7 @@ def compare_scenarios(
         make_radio_choropleth_map(
             scenario_dir=output_dir,
             in_data=geom_comparison,
-            outfile="mode_share_comparison_map.html",
+            outfile=os.path.join(output_dir,"mode_share_comparison_map.html"),
             columns_to_viz=mode_share_cols,
         )
 

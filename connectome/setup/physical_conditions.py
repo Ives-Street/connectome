@@ -18,7 +18,8 @@ import zipfile
 import tempfile
 import shutil
 
-from setup.tomtom_conflation import conflate_tomtom_to_osm
+from traffic_utils.tomtom_speed_utils import conflate_tomtom_to_osm
+from traffic_utils.tmas_volume_utils import match_tmas_stations_to_graph
 
 os.environ['MOBILITY_API_REFRESH_TOKEN'] = open("mobility_db_refresh_token.txt").read().rstrip("\n")
 os.environ['MAPBOX_TOKEN'] = open("mapbox_token.txt").read().rstrip("\n")
@@ -737,6 +738,7 @@ def benchmark_driving_times(analysis_areas: gpd.GeoDataFrame,
 
 def physical_conditions(scenario_dir,
                         traffic_datasource = None, #None, "mapbox", or "tomtom"
+                        volume_datasource = None, #None or "tmas"
                         mapbox_num_traffic_groups=7,
                         mapbox_sample_count_per_group=2,
                         ):
@@ -775,23 +777,39 @@ def physical_conditions(scenario_dir,
 
         analysis_areas.to_file(f"{input_dir}/analysis_areas.gpkg", driver="GPKG")
 
+
     #todo consider function calls here to interpolate capacities and volumes?
 
     elif traffic_datasource == "tomtom":
+        os.makedirs(f"{input_dir}/traffic/pre_benchmark/", exist_ok=True)
         if not (os.path.exists(f"{input_dir}/tomtom/tomtom_geom.geojson") and
              os.path.exists(f"{input_dir}/tomtom/tomtom_speeds.json")):
             raise FileNotFoundError(f"Tomtom input data not found in {input_dir}/tomtom/tomtom_geom.geojson and tomtom_speeds.json. Please download.")
-        os.makedirs(f"{input_dir}/traffic/", exist_ok=True)
 
-        if not os.path.exists(f"{input_dir}/traffic/graph_with_speeds.graphml"):
+
+        if not os.path.exists(f"{input_dir}/traffic/pre_benchmark/routing_graph.graphml"):
             conflate_tomtom_to_osm(
                f"{input_dir}/osm_study_area_editable.osm",
                 f"{input_dir}/tomtom/tomtom_speeds.json",
                 f"{input_dir}/tomtom/tomtom_geom.geojson",
                 debug_gpkg_prefix = f"{input_dir}/tomtom/debug",
-                save_graphml_to = f"{input_dir}/traffic/graph_with_speeds.graphml",
-                save_nodes_to = f"{input_dir}/traffic/nodes.gpkg",
-                save_edges_to = f"{input_dir}/traffic/edges.gpkg",
+                save_graphml_to = f"{input_dir}/traffic/pre_benchmark/routing_graph.graphml",
+                save_nodes_to = f"{input_dir}/traffic/pre_benchmark/nodes.gpkg",
+                save_edges_to = f"{input_dir}/traffic/pre_benchmark/edges.gpkg",
+            )
+
+    if volume_datasource == "tmas":
+        os.makedirs(f"{input_dir}/traffic/pre_benchmark/", exist_ok=True)
+        if not (os.path.exists(f"{input_dir}/tmas/tmas.VOL") and
+                os.path.exists(f"{input_dir}/tmas/tmas.STA")):
+            raise FileNotFoundError(
+                f"TMAS input data not found in {input_dir}/tmas/tmas.VOL and {input_dir}/tmas/tmas.STA. Please download."
+            )
+        if not os.path.exists(f"{input_dir}/traffic/pre_benchmark/graph_with_speed_and_volumes.graphml"):
+            match_tmas_stations_to_graph(
+                f"{input_dir}/traffic/pre_benchmark/routing_graph.graphml",
+                f"{input_dir}/tmas/tmas.STA",
+                save_matches_gpkg_to = f"{input_dir}/traffic/pre_benchmark/tmas_station_matches.gpkg",
             )
 
     # Get GTFS data if it doesn't exist

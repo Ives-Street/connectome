@@ -5,10 +5,17 @@ import PyQt6
 from pygris import states
 import shutil
 
+import osmnx as ox
+
+from connectome.traffic_utils.tmas_volume_utils import demand_to_volume_ratio
+
 #assume we're running this from connectome/connectome/
 #in case we're just in connectome/ :
 if not os.path.exists('setup'):
     os.chdir('connectome/')
+
+from traffic_utils.assignment_utils import assign_relative_demand, back_calculate_freeflow_speeds_from_obs
+from traffic_utils.tmas_volume_utils import apply_tmas_obs_volumes_to_graph, infer_volumes_from_relative_demand
 
 from setup.physical_conditions import physical_conditions
 from setup.populate_people_usa import populate_people_usa
@@ -35,14 +42,78 @@ import communication
 
 
 def run_scenario(scenario_dir,
-                 states,
-                 address = None,
-                 lat=None,
-                 lon=None,
-                 buffer = 30000, #m
-                 taz_file = None,
-                 traffic_datasource = None,
-                ):
+                 volume_datasource = None):
+    print("loading experiences")
+
+    analysis_areas = gpd.read_file(f"{scenario_dir}/input_data/analysis_areas.gpkg")
+    analysis_areas.index = analysis_areas['geom_id'].values
+
+    if not os.path.exists(f"{scenario_dir}/routing/user_classes_with_routeenvs.csv"):
+        print("defining experiences")
+        user_classes_w_routeenvs = apply_experience_defintions(f"{scenario_dir}/input_data", scenario_dir)
+        user_classes_w_routeenvs.index = user_classes_w_routeenvs.user_class_id.values
+    else:
+        print("loading experiences from disk")
+        user_classes_w_routeenvs = pd.read_csv(f"{scenario_dir}/routing/user_classes_with_routeenvs.csv")
+        user_classes_w_routeenvs.index = user_classes_w_routeenvs.user_class_id.values
+        user_classes_w_routeenvs.fillna("", inplace=True)
+
+
+    if not os.path.exists(f"{scenario_dir}/impedances"):
+        print("routing")
+        route_for_all_envs(f"{scenario_dir}",
+                           analysis_areas,
+                           user_classes_w_routeenvs
+                           )
+    else:
+        print("routing already done. skipping.")
+
+    #structure ttms and create cost matrices
+    if not os.path.exists(f"{scenario_dir}/results/geometry_results.gpkg"):
+        print("evaluating")
+        evaluate_scenario(scenario_dir,
+                          user_classes_w_routeenvs,
+                          analysis_areas,
+                          )
+    if not os.path.exists(f"{scenario_dir}/results/geometry_results.html"):
+        communication.make_radio_choropleth_map(
+            scenario_dir=scenario_dir,
+            in_data="results/geometry_results.gpkg",
+            outfile="results/geometry_results.html"
+        )
+
+    else:
+        print("scenario has already been run")
+
+    # traffic benchmarking analysis
+    if bool(volume_datasource):
+        if not os.path.exists(f"{scenario_dir}/input_data/traffic/post_benchmark/graph_with_relative_demands.graphml"):
+            print("assigning relative demands")
+            assign_relative_demand(scenario_dir)
+        G, matched_edges = None, None
+        if not os.path.exists(f"{scenario_dir}/input_data/traffic/post_benchmark/edges_with_demands_and_TMAS_vols.gpkg"):
+            print("applying TMAS volumes to graph")
+            G, matched_edges = apply_tmas_obs_volumes_to_graph(scenario_dir,
+                                            date_start="2024-08-05",
+                                            date_end="2024-08-09",
+                                            hours=[8],
+                                            )
+        if not os.path.exists(f"{scenario_dir}/input_data/traffic/post_benchmark/graph_with_demands_and_modeled_vols.graphml"):
+            print("establishing demand_to_volume_ratio")
+            infer_volumes_from_relative_demand(scenario_dir, G, matched_edges)
+        if not os.path.exists(f"{scenario_dir}/input_data/traffic/post_benchmark/routing_graph.graphml"):
+            back_calculate_freeflow_speeds_from_obs(scenario_dir)
+
+def initialize_existing_conditions(scenario_dir,
+                                   states,
+                                   address = None,
+                                   lat=None,
+                                   lon=None,
+                                   buffer = 30000,  #m
+                                   taz_file = None,
+                                   traffic_datasource = None,
+                                   volume_datasource = None,
+                                   ):
 
     os.makedirs(f"{scenario_dir}/input_data", exist_ok=True)
     input_dir = f'{scenario_dir}/input_data'
@@ -135,63 +206,51 @@ def run_scenario(scenario_dir,
 
     calculate_population_per_sqkm(input_dir)
 
-    #load results of getting tract info (need to reload analysis areas because we've added population density)
-    userclass_statistics = pd.read_csv(f"{input_dir}/userclass_statistics.csv")
-    user_classes = pd.read_csv(f"{input_dir}/user_classes.csv")
-    user_classes.index = user_classes.user_class_id.values
-    user_classes.fillna("", inplace=True)
-    analysis_areas = gpd.read_file(f"{input_dir}/analysis_areas.gpkg")
-    analysis_areas.index = analysis_areas['geom_id'].values
-
-
-
     # get physical conditions
     # includes its own has-this-already-been-run checks
     physical_conditions(scenario_dir,
-                        traffic_datasource = traffic_datasource)
+                        traffic_datasource = traffic_datasource,
+                        volume_datasource = volume_datasource,)
 
-    if not os.path.exists(f"{scenario_dir}/routing/user_classes_with_routeenvs.csv"):
-        print("defining experiences")
-        user_classes_w_routeenvs = apply_experience_defintions(input_dir, scenario_dir)
 
-    else:
-        print("loading experiences")
-        user_classes_w_routeenvs = pd.read_csv(f"{scenario_dir}/routing/user_classes_with_routeenvs.csv")
-    user_classes_w_routeenvs.index = user_classes_w_routeenvs.user_class_id.values
-    user_classes_w_routeenvs.fillna("", inplace=True)
 
-    if not os.path.exists(f"{scenario_dir}/impedances"):
-        print("routing")
-        route_for_all_envs(f"{scenario_dir}",
-                           analysis_areas,
-                           user_classes_w_routeenvs
-                           )
-    else:
-        print("routing already done. skipping.")
 
-    #structure ttms and create cost matrices
-    if not os.path.exists(f"{scenario_dir}/results/geometry_results.geojson"):
-        print("evaluating")
-        evaluate_scenario(scenario_dir, user_classes_w_routeenvs, userclass_statistics, analysis_areas)
-        communication.make_radio_choropleth_map(
-            scenario_dir=scenario_dir,
-            in_data="results/geometry_results.gpkg",
-            outfile="results/geometry_results.html"
-        )
-    else:
-        print("scenario has already been run")
+
+def create_lewes_pricing_scenario(scenario_dir, new_scenario_dir):
+    shutil.copytree(f'{scenario_dir}/input_data/', f"{new_scenario_dir}/input_data/", dirs_exist_ok=True)
+
+
+    G = ox.load_graphml(f"{new_scenario_dir}/input_data/traffic/post_benchmark/routing_graph.graphml")
+    # Set toll attribute for Coastal Highway edges
+    for u, v, k, data in G.edges(keys=True, data=True):
+        if data.get('name') == 'Coastal Highway':
+            G.edges[u, v, k]['toll'] = 'yes'
+
+    # Save modified graph
+    ox.save_graphml(G, f"{new_scenario_dir}/input_data/traffic/post_benchmark/routing_graph.graphml")
 
 
 if __name__ == "__main__":
-    run_scenario(
-        scenario_dir = "testing/lewes/existing_conditions",
+    traffic_datasource = "tomtom"
+    volume_datasource = "tmas"
+    initialize_existing_conditions(
+        scenario_dir = "testing/lewes/existing_conditions/",
         states = ["DE"],
         lat=38.7710985,
         lon=-75.141997,
         buffer = 9000,
-        traffic_datasource = "tomtom",
+        traffic_datasource = traffic_datasource,
+        volume_datasource = volume_datasource,
+
         #scenario_dir = "testing/denver/existing_conditions",
         #states = ["CO"],
         #taz_file = "testing/denver/taz.geojson"
     )
-    #communication.compare_scenarios("testing/ri_test", "existing_conditions", "regional_rail")
+    run_scenario("testing/lewes/existing_conditions/",
+                 volume_datasource=volume_datasource)
+
+    create_lewes_pricing_scenario("testing/lewes/existing_conditions/", "testing/lewes/lewes_pricing/")
+
+    run_scenario("testing/lewes/lewes_pricing",)
+
+    communication.compare_scenarios("testing/lewes", "existing_conditions", "lewes_pricing")

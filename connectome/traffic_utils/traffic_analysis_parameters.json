@@ -1,0 +1,142 @@
+{
+  "version": "1.1",
+  "metadata": {
+    "description": "Unified configuration for congestion formulas, functional classes, clamps, lanes, and capacity used in Ives Street traffic analyses.",
+    "formulas": {
+      "travel_time": "t = t0 * (1 + alpha * (vc_ratio ** beta))",
+      "speed": "u = u_ff / (1 + alpha * (vc_ratio ** beta))",
+      "notes": "vc_ratio = v / c, where v is directional volume (vph) and c is directional capacity (vph)."
+    }
+  },
+
+  "functional_classes": {
+    "motorway": {
+      "description": "Fully access-controlled freeways and motorways.",
+      "alpha": 0.15,
+      "beta": 4.0,
+      "osm_highway_tags": ["motorway", "motorway_link"]
+    },
+    "trunk": {
+      "description": "High-capacity regional roads not fully access-controlled.",
+      "alpha": 0.15,
+      "beta": 3.5,
+      "osm_highway_tags": ["trunk", "trunk_link"]
+    },
+    "arterial": {
+      "description": "Principal urban/suburban arterials.",
+      "alpha": 0.15,
+      "beta": 3.0,
+      "osm_highway_tags": ["primary", "primary_link"]
+    },
+    "collector": {
+      "description": "Secondary arterials and collectors.",
+      "alpha": 0.10,
+      "beta": 2.5,
+      "osm_highway_tags": ["secondary", "secondary_link", "tertiary"]
+    },
+    "local": {
+      "description": "Local streets, access roads, and minor roads.",
+      "alpha": 0.05,
+      "beta": 2.0,
+      "osm_highway_tags": [
+        "residential",
+        "unclassified",
+        "service",
+        "living_street",
+        "road",
+        "track"
+      ]
+    }
+  },
+
+  "clamps": {
+    "vc_ratio": {
+      "min_vc": 0.05,
+      "max_vc": 1.5
+    },
+    "speed": {
+      "min_speed_kph": 8.0,
+      "max_speed_factor_of_ff": 1.0
+    },
+    "inverse_volume_estimation": {
+      "min_vc_after_inversion": 0.05,
+      "max_vc_after_inversion": 1.5
+    }
+  },
+
+  "toll_cost_per_km": {
+    "description": "Dollars per km, taken as a rough average of current charges on I25 and I70",
+    "cost_per_km": 0.62
+  },
+
+  "value_of_travel_time": {
+    "description": "value of an hour of travel time, expressed as a fraction of hourly wage",
+    "personal_medium_value":0.25,
+    "source": "https://www.vtpi.org/tca/tca0502.pdf ,  p.5.2-23"
+  },
+
+  "link_penalties": {
+    "link_traversal_time_penalty_sec": 12.0,
+    "link_traversal_time_penalty_max_length_m": 300.0
+  },
+
+  "signal_capacity_factor_default": 0.6,
+  "signal_capacity_functional_classes": {
+    "motorway":  { "signal_capacity_factor": 0.6 },
+    "trunk":     { "signal_capacity_factor": 0.6 },
+    "arterial":  { "signal_capacity_factor": 0.55 },
+    "collector": { "signal_capacity_factor": 0.5 },
+    "local":     { "signal_capacity_factor": 0.5 }
+  },
+
+  "default_dir_lanes_by_highway": {
+    "motorway": 3,
+    "motorway_link": 1,
+    "trunk": 2,
+    "trunk_link": 1,
+    "primary": 2,
+    "primary_link": 1,
+    "secondary": 2,
+    "secondary_link": 1,
+    "tertiary": 1,
+    "tertiary_link": 1,
+    "unclassified": 1,
+    "residential": 1,
+    "living_street": 1,
+    "service": 1,
+    "track": 1
+  },
+
+  "capacity_per_lane_by_highway": {
+  "default": 1200,
+  "motorway": 2200,
+  "motorway_link": 1800,
+  "trunk": 2000,
+  "trunk_link": 1800,
+  "primary": 1900,
+  "primary_link": 1800,
+  "secondary": 1800,
+  "secondary_link": 1700,
+  "tertiary": 1700,
+  "tertiary_link": 1600,
+  "unclassified": 1200,
+  "residential": 900,
+  "living_street": 400,
+  "service": 600,
+  "track": 400
+  },
+
+  "osm_highway_to_tmas_fsystem_rank": {
+  "motorway":        [1, 2, 3],
+  "trunk":           [2, 1, 3],
+  "primary":         [3, 2, 4, 5],
+  "secondary":       [4, 3, 5, 2, 6],
+  "tertiary":        [5, 4, 6, 3, 7],
+  "unclassified":    [7, 6, 5],
+  "residential":     [7, 6, 5],
+  "living_street":   [7],
+  "service":         [7, 6, 5],
+  "road":            [4, 3, 5, 2, 6, 7]
+  }
+
+}

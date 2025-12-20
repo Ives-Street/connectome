@@ -89,7 +89,9 @@ def get_population_by_geom_and_userclass(geometry_and_dests, userclass_statistic
 
     return population_by_geom_and_userclass
 
-def choose_modes_for_userclasses(userclass_gtms):
+def choose_modes_for_userclasses(scenario_dir,
+                                 userclass_gtms,
+                                 save_data = True):
     """
     input: a dictionary of impedance matrices by mode, indexed by mode name
     returns two dataframes: lowest_values and mode_selections
@@ -150,6 +152,18 @@ def choose_modes_for_userclasses(userclass_gtms):
         lowest_traveltimes_by_userclass[userclass] = lowest_traveltimes
         mode_selections_by_userclass[userclass] = mode_selections
 
+        if save_data:
+            for directory in [f"{scenario_dir}/results/detailed_data/lowest_traveltimes_by_userclass",
+                              f"{scenario_dir}/results/detailed_data/mode_selections_by_userclass",
+                              ]:
+                os.makedirs(directory, exist_ok=True)
+            lowest_traveltimes_by_userclass[userclass].to_csv(
+                f"{scenario_dir}/results/detailed_data/lowest_traveltimes_by_userclass/{userclass}.csv"
+            )
+            mode_selections_by_userclass[userclass].to_csv(
+                f"{scenario_dir}/results/detailed_data/mode_selections_by_userclass/{userclass}.csv"
+            )
+
     return lowest_traveltimes_by_userclass, mode_selections_by_userclass
 
 def value_per_destination_unit(minute_equivalents) -> float:
@@ -159,7 +173,13 @@ def value_per_destination_unit(minute_equivalents) -> float:
     return val_per_dest
 
 
-def evaluate_for_userclasses(lowest_traveltimes_by_userclass, geometry_and_dests, population_by_geom_and_userclass):
+def evaluate_for_userclasses(
+        scenario_dir,
+        lowest_traveltimes_by_userclass,
+        geometry_and_dests,
+        population_by_geom_and_userclass,
+        save_data = True,
+    ):
     value_sum_per_person_by_userclass = {}
     values_per_dest_by_userclass = {}
     value_sum_total_by_OD_by_userclass = {}
@@ -188,6 +208,24 @@ def evaluate_for_userclasses(lowest_traveltimes_by_userclass, geometry_and_dests
         value_sum_per_person = value_sum_per_person_by_userclass[userclass]
         value_sum_total_by_OD = value_sum_per_person.mul(pop_by_geom, axis=0)
         value_sum_total_by_OD_by_userclass[userclass] = value_sum_total_by_OD
+
+        if save_data:
+            for directory in [f"{scenario_dir}/results/detailed_data/values_per_dest_by_userclass",
+                                f"{scenario_dir}/results/detailed_data/value_sum_per_person_by_userclass",
+                                f"{scenario_dir}/results/detailed_data/value_sum_total_by_OD_by_userclass"]:
+                os.makedirs(directory, exist_ok=True)
+            values_per_dest_by_userclass[userclass].to_csv(
+                f"{scenario_dir}/results/detailed_data/values_per_dest_by_userclass/{userclass}.csv"
+            )
+            value_sum_per_person_by_userclass[userclass].to_csv(
+                f"{scenario_dir}/results/detailed_data/value_sum_per_person_by_userclass/{userclass}.csv"
+            )
+            value_sum_total_by_OD_by_userclass[userclass].to_csv(
+                f"{scenario_dir}/results/detailed_data/value_sum_total_by_OD_by_userclass/{userclass}.csv"
+            )
+
+
+
     return values_per_dest_by_userclass, value_sum_per_person_by_userclass, value_sum_total_by_OD_by_userclass
 
 
@@ -308,24 +346,40 @@ def get_geometry_results_with_viz(
     communication.make_radio_choropleth_map(
         scenario_dir=scenario_dir,
         in_data=results_by_geometry,
-        outfile="results/geometry_results.html"
+        outfile=f"{scenario_dir}/results/geometry_results.html"
     )
 
-    by_uc_dir = f"{out_dir}/by_userclass"
+    by_uc_dir = f"{out_dir}/geo_viz_by_userclass"
     os.makedirs(by_uc_dir, exist_ok=True)
     for uc, gdf_uc in by_geom_and_userclass.items():
         gdf_uc.to_file(f"{by_uc_dir}/results_{uc}.gpkg", driver="GPKG")
         communication.make_radio_choropleth_map(
             scenario_dir=scenario_dir,
             in_data=gdf_uc,
-            outfile=f"results/by_userclass/results_{uc}.html"
+            outfile=f"{by_uc_dir}/results_{uc}.html"
         )
 
     return results_by_geometry
 
 
-def evaluate_scenario(scenario_dir, user_classes, userclass_statistics, geometry_and_dests):
+def evaluate_scenario(scenario_dir,
+                      user_classes,
+                      geometry_and_dests,
+                      ):
     os.makedirs(f"{scenario_dir}/results", exist_ok=True)
+
+    userclass_statistics = pd.read_csv(f"{scenario_dir}/input_data/userclass_statistics.csv", index_col="user_class_id")
+
+    # Ensure indices are user_class_id everywhere
+    if 'user_class_id' in user_classes.columns:
+        user_classes = user_classes.copy()
+        user_classes.index = user_classes['user_class_id'].astype(str)
+    else:
+        user_classes.index = user_classes.index.astype(str)
+
+    if 'user_class_id' in userclass_statistics.columns:
+        userclass_statistics = userclass_statistics.copy()
+        userclass_statistics['user_class_id'] = userclass_statistics['user_class_id'].astype(str)
 
     #load the gtms organized by userclass
     userclass_gtms = load_gtms_for_userclasses(scenario_dir, user_classes)
@@ -338,14 +392,15 @@ def evaluate_scenario(scenario_dir, user_classes, userclass_statistics, geometry
     (
         lowest_traveltimes_by_userclass,
         mode_selections_by_userclass
-    ) = choose_modes_for_userclasses(userclass_gtms)
+    ) = choose_modes_for_userclasses(scenario_dir, userclass_gtms)
 
     # get values for each userclass
     (
         values_per_dest_by_userclass,
         value_sum_per_person_by_userclass,
         value_sum_total_by_OD_by_userclass
-    ) = evaluate_for_userclasses(lowest_traveltimes_by_userclass,
+    ) = evaluate_for_userclasses(scenario_dir,
+                                 lowest_traveltimes_by_userclass,
                                  geometry_and_dests,
                                  population_by_geom_and_userclass)
 
