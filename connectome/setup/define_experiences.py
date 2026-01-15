@@ -5,6 +5,12 @@ import osmium
 import json
 import osmnx as ox
 from pathlib import Path
+import logging
+
+from tqdm import tqdm
+
+# Set up module-level logger
+logger = logging.getLogger(__name__)
 
 # Resolve traffic_analysis_parameters.json relative to this file's location,
 # so it works regardless of the current working directory.
@@ -144,7 +150,9 @@ def add_lts_tags(osm_filename: str, out_filename: str, max_lts: int = 3) -> None
     ltsadder.apply_file(osm_filename)
     print(f'With max_lts {max_lts}, added lts=1,2, or 3 to {ltsadder.n_modified_ways}')
 
-def define_experiences(input_dir, scenario_dir) -> pd.DataFrame:
+def define_experiences(input_dir,
+                       scenario_dir,
+                       save_traffic_edges = False) -> pd.DataFrame:
     """
     Creates a new directory "routing environment" with OSM/GTFS files reflecting conditions as experienced
     by each combination of user class and mode
@@ -153,10 +161,7 @@ def define_experiences(input_dir, scenario_dir) -> pd.DataFrame:
 
     input_osm_filename = f"{input_dir}/osm_study_area.pbf"
     input_gtfs_dir = f"{input_dir}/GTFS/"
-    if os.path.exists(f"{input_dir}/traffic/post_benchmark/routing_graph.graphml"):
-        input_traffic_dir = f"{input_dir}/traffic/post_benchmark/"
-    else:
-        input_traffic_dir = f"{input_dir}/traffic/pre_benchmark/"
+    input_traffic_dir = f"{input_dir}/traffic/"
     user_classes = pd.read_csv(f"{input_dir}/user_classes.csv")
     destination_dir = f"{scenario_dir}/routing/"
     save_userclasses_to = f"{scenario_dir}/routing/user_classes_with_routeenvs.csv"
@@ -169,27 +174,41 @@ def define_experiences(input_dir, scenario_dir) -> pd.DataFrame:
 
     # TODO - this is where we'll have to adjust link-level driving impedances for toll roads
 
+    logger.info("Looking for toll roads in the graph...")
     G = ox.load_graphml(f"{input_traffic_dir}/routing_graph.graphml")
-    for u, v, k, data in G.edges(keys=True, data=True):
-        if data.get('toll') == 'yes':
-            any_roads_tolled = True
-            break
+
+    # If we've already stored this info on the graph, reuse it
+    toll_edges: list[tuple] = []
+
+    # Single pass: collect tolled edges and infer any_roads_tolled
+    for u, v, key, data in G.edges(keys=True, data=True):
+        if data.get("toll") == "yes":
+            toll_edges.append((u, v, key))
+
+    any_roads_tolled = len(toll_edges) > 0
+
+    if any_roads_tolled:
+        logger.info("Toll roads identified (%d tolled edges)", len(toll_edges))
+    else:
+        logger.info("No toll roads found in the graph")
 
     universal_routing_env_id = "universal_re"
     # A: first let's do TRANSIT and WALK:
     # if there's no toll roads, we can also include CAR here
-    # 1) make the directory
     os.makedirs(f"{destination_dir}/{universal_routing_env_id}", exist_ok=True)
-    # 2) copy the osm, traffic, and gtfs files
-    shutil.copy(input_osm_filename,f"{destination_dir}/{universal_routing_env_id}/osm_file.pbf")
+    shutil.copy(input_osm_filename, f"{destination_dir}/{universal_routing_env_id}/osm_file.pbf")
     shutil.copytree(input_gtfs_dir, f"{destination_dir}/{universal_routing_env_id}/gtfs_files/", dirs_exist_ok=True)
+
     if not any_roads_tolled:
-        shutil.copytree(input_traffic_dir, f"{destination_dir}/{universal_routing_env_id}/traffic/", dirs_exist_ok=True)
-    
+        shutil.copytree(
+            input_traffic_dir,
+            f"{destination_dir}/{universal_routing_env_id}/traffic/",
+            dirs_exist_ok=True,
+        )
+
     # 3) create a parameters file for r5 routing
-    r5_params = {
-    }
-    with open(f"{destination_dir}/{universal_routing_env_id}/r5_params.json", 'w') as f:
+    r5_params = {}
+    with open(f"{destination_dir}/{universal_routing_env_id}/r5_params.json", "w") as f:
         json.dump(r5_params, f)
 
     # 4) assign that ID to the user_classes dataframe
@@ -197,40 +216,72 @@ def define_experiences(input_dir, scenario_dir) -> pd.DataFrame:
     user_classes.loc[:, "routeenv_WALK"] = universal_routing_env_id
     if not any_roads_tolled:
         user_classes.loc[:, "routeenv_CAR"] = universal_routing_env_id
-        # even userclasses without a car will use universal routing env to route car,
-        # they just will only have the choice of ridehail later
 
     # B: If there are toll roads, create a separate routing environment for each income group
     if any_roads_tolled:
-        # TODO: allow for different tolls by road name
-        toll_cost_per_km = traffic_params['toll_cost_per_km']['cost_per_km']
-        time_value_rate = traffic_params['value_of_travel_time']['personal_medium_value'] # expected 0.25
-        for max_income in user_classes.max_income.unique():
-            # create the routing env for this income group (no need for OSM or GTFS)
+        logger.info("Applying income-specific impedances to toll roads")
+
+        toll_costs = traffic_params["toll_cost_per_km"]
+        time_value_rate = traffic_params["value_of_travel_time"]["personal_medium_value"]  # expected 0.25
+
+        logger.info("Creating separate routing environments for each income group")
+        for max_income in tqdm(list(user_classes.max_income.unique())):
             income_routeenv_id = f"driving_income_{max_income}"
             os.makedirs(f"{destination_dir}/{income_routeenv_id}/traffic/", exist_ok=True)
-            # toll time-cost relationship
-            hourly_wage = max_income / 1800 # rough average for working hours per year in the USA
-            #100k -> 55$/hr
-            dollars_per_second = hourly_wage * (1/60) * (1/60)
-            # 55$/hr * hr/60min * min/60se = 0.015 $/sec
-            seconds_per_dollar = 1/dollars_per_second
-            # 65 sec/$ (someone making 100k will pay $1 to save a minute, with strict wage-equivalence)
-            seconds_per_dollar_adj = seconds_per_dollar / time_value_rate
-            # 260 sec/$ actually, it's more like they'd spend $1 to save 4 min, under most conditions
+
+            hourly_wage = max_income / 1800
+            dollars_per_second = hourly_wage * (1 / 60) * (1 / 60)
+            seconds_per_dollar = 1 / dollars_per_second
+            seconds_per_dollar_adj = seconds_per_dollar / time_value_rate  # kept if you want to use it later
+
             income_group_graph = G.copy()
-            for u, v, key, data in income_group_graph.edges(keys=True, data=True):
-                if 'toll' in data.keys() and data['toll'] == 'yes':
-                    # Calculate time penalty based on length and toll cost
-                    time_penalty = (float(data['length'])/1000) * toll_cost_per_km * seconds_per_dollar
-                    existing_traversal_time = float(income_group_graph.edges[u, v, key]['traversal_time_sec'])
-                    income_group_graph.edges[u, v, key]['traversal_time_sec'] = existing_traversal_time + time_penalty
-            # save modified graph
-            ox.save_graphml(income_group_graph,f"{destination_dir}/{income_routeenv_id}/traffic/routing_graph.graphml")
-            edges = ox.graph_to_gdfs(income_group_graph, nodes=False, edges=True)
-            edges.to_file(f"{destination_dir}/{income_routeenv_id}/traffic/edges.gpkg", driver="GPKG")
-            # assign routeenv
-            selector = user_classes['max_income'] == max_income
+
+            # Only iterate over tolled edges instead of all edges
+            for u, v, key in toll_edges:
+                data = income_group_graph.edges[u, v, key]
+
+                link_ref = data.get("ref")
+                if isinstance(link_ref, list):
+                    link_ref = link_ref[0]
+
+                toll_cost_per_km = toll_costs.get(link_ref, toll_costs["default"])
+
+                if data.get("scenario_toll") == "yes":
+                    general_lane_traversal_time = data["traversal_time_sec"]
+                    express_lane_length_m = float(data["length"])
+                    express_lane_speed_kph = float(data["ff_speed_kph"])
+                    express_lane_speed_mps = express_lane_speed_kph / 3.6
+                    express_traversal_time = express_lane_length_m / express_lane_speed_mps
+                    express_time_penalty = (express_lane_length_m / 1000) * toll_cost_per_km * seconds_per_dollar
+                    express_total_timecost = express_traversal_time + express_time_penalty
+                    selected_cost = min(express_total_timecost, general_lane_traversal_time)
+                    income_group_graph.edges[u, v, key]["traversal_time_sec"] = selected_cost
+                else:
+                    time_penalty = (float(data["length"]) / 1000) * toll_cost_per_km * seconds_per_dollar
+                    if data.get("ref") == "I270_NoWidening":
+                        express_lane_length_m = float(data["length"])
+                        express_lane_speed_kph = float(data["ff_speed_kph"])
+                        express_lane_speed_mps = express_lane_speed_kph / 3.6
+                        express_traversal_time = express_lane_length_m / express_lane_speed_mps
+                        income_group_graph.edges[u, v, key]["peak_traversal_time_sec"] = (
+                            express_traversal_time + time_penalty
+                        )
+                    else:
+                        existing_time = float(income_group_graph.edges[u, v, key]["peak_traversal_time_sec"])
+                        income_group_graph.edges[u, v, key]["peak_traversal_time_sec"] = existing_time + time_penalty
+
+            ox.save_graphml(
+                income_group_graph,
+                f"{destination_dir}/{income_routeenv_id}/traffic/routing_graph.graphml",
+            )
+            if save_traffic_edges:
+                edges = ox.graph_to_gdfs(income_group_graph, nodes=False, edges=True)
+                edges.to_file(
+                    f"{destination_dir}/{income_routeenv_id}/traffic/edges.gpkg",
+                    driver="GPKG",
+                )
+
+            selector = user_classes["max_income"] == max_income
             user_classes.loc[selector, "routeenv_CAR"] = income_routeenv_id
 
     # C: Finally, let's do the bike options
@@ -244,9 +295,9 @@ def define_experiences(input_dir, scenario_dir) -> pd.DataFrame:
         add_lts_tags(input_osm_filename,
                      f"{destination_dir}/{bike_env_id}/osm_file.pbf",
                      lts)
-        # copy GTFS, just for the heck of it, we won't actually use it for routing
+        # do NOT copy GTFS for now
         # maybe someday we'll route bike-to-transit options
-        shutil.copytree(input_gtfs_dir, f"{destination_dir}/{bike_env_id}/gtfs_files/")
+        # shutil.copytree(input_gtfs_dir, f"{destination_dir}/{bike_env_id}/gtfs_files/")
         # 3) create a parameters file for r5 routing
         r5_params = {
             "max_bicycle_traffic_stress": lts,

@@ -1,6 +1,7 @@
 import os
 import json
 import zipfile
+import csv
 import shutil
 import tempfile
 
@@ -15,6 +16,7 @@ from tqdm import tqdm
 import fiona
 from shapely.geometry import LineString
 
+import car_routing
 import communication
 import logging
 
@@ -28,354 +30,95 @@ MODES = [ #todo - make this universal for the whole codebase
     "BICYCLE",
 ]
 #
-DEPARTURE_TIME = datetime.datetime.now().replace(hour=9, minute=0, second=0) + datetime.timedelta(
-    days=(1 - datetime.datetime.now().weekday() + 7) % 7 + (1 if datetime.datetime.now().weekday() >= 3 else 0))
 
 
-def nx_route_environment(
-    routeenv,
-    mode,
-    scenario_dir,
-    rep_points,
-    departure_time,
-    save_paths: str = 'parquet',
-    visualize_routes: bool | list = True,
-):
+DEPARTURE_TIME = datetime.datetime(2026, 1, 21, 8, 0, 0)
+
+#old -- today, 9am
+# DEPARTURE_TIME = datetime.datetime.now().replace(hour=9, minute=0, second=0) + datetime.timedelta(
+#     days=(1 - datetime.datetime.now().weekday() + 7) % 7 + (1 if datetime.datetime.now().weekday() >= 3 else 0))
+
+# ---------------------------------------------------------------------------
+# Helper: filter out GTFS feeds that are known to break r5py
+# ---------------------------------------------------------------------------
+
+def _filter_invalid_gtfs_for_r5py(gtfs_fullpaths: list[str]) -> list[str]:
     """
-    Load a GraphML network and compute an all-to-all travel-time matrix between rep_points.
-    Optionally also save the traversed edges (u, v, key) for each O/D shortest path.
+    Inspect GTFS zip files and drop ones that are obviously invalid for r5py.
+
+    Currently:
+    - If a feed contains calendar_dates.txt but that file has no data rows
+      (only a header), it is skipped because r5py raises EmptyTableError
+      on such feeds.
 
     Parameters
     ----------
-    routeenv : str
-        Name of the routing environment (e.g., scenario name).
-    mode : str
-        Travel mode identifier (used in filenames).
-    scenario_dir : str
-        Base directory for this scenario.
-    rep_points : geopandas.GeoDataFrame
-        Representative points with an 'id' column and point geometries.
-    departure_time : any
-        Currently unused, but kept for API compatibility.
-    save_paths : str, optional
-        Format to save path data: 'csv', 'parquet', or None. By default 'parquet'.
-    visualize_routes : bool or sequence, optional
-        If False (default): no visualizations.
-        If True: visualize all origins.
-        If sequence: visualize routes for the listed origin_ids.
+    gtfs_fullpaths : list of str
+        Full paths to GTFS zip files.
 
     Returns
     -------
-    pandas.DataFrame
-        Wide matrix of travel times in minutes between rep_points (ids as index/columns).
+    list of str
+        Subset of gtfs_fullpaths that appear valid.
     """
+    valid = []
+    for path in gtfs_fullpaths:
+        # Default: keep the file unless we detect a fatal issue
+        keep = True
 
-    raw_ttm_filename = f"{scenario_dir}/routing/{routeenv}/raw_ttms/raw_ttm_{mode}.csv"
-    paths_parquet_filename = (
-        f"{scenario_dir}/routing/{routeenv}/paths/paths_{mode}.parquet"
-    )
-    paths_csv_filename = (
-        f"{scenario_dir}/routing/{routeenv}/paths/paths_{mode}.csv"
-    )
-
-    # Return cached TTM if it exists (paths are not re-used here; they are diagnostic)
-    if os.path.exists(raw_ttm_filename):
-        logger.info(
-            "Found cached raw TTM for routeenv='%s', mode='%s' at '%s'",
-            routeenv,
-            mode,
-            raw_ttm_filename,
-        )
-        logger.debug("Loading cached TTM from CSV")
-        ttm_wide = pd.read_csv(raw_ttm_filename, index_col=0)
-        ttm_wide.index = ttm_wide.index.astype(str)
-        ttm_wide.columns = ttm_wide.columns.astype(str)
-        logger.debug("Loaded cached TTM with shape %s", ttm_wide.shape)
-        return ttm_wide
-
-    # 1. Load graph
-    G = ox.load_graphml(
-        f"{scenario_dir}/routing/{routeenv}/traffic/routing_graph.graphml"
-    )
-
-    # 2. Determine weight attribute
-    weight_attr = "traversal_time_sec"
-
-    # Ensure the weight attribute is numeric on all edges
-    bad_weight_count = 0
-    missing_weight_count = 0
-    for u, v, k, data in G.edges(keys=True, data=True):
-        if weight_attr not in data:
-            missing_weight_count += 1
-            # Treat missing weight as "impassable" for routing
-            data[weight_attr] = float("inf")
+        if not os.path.isfile(path):
+            logger.warning("GTFS file does not exist, skipping: %s", path)
             continue
-        val = data[weight_attr]
-        # Coerce to float if it's not already a clean number
+
         try:
-            if not isinstance(val, (int, float)):
-                data[weight_attr] = float(val)
-        except (TypeError, ValueError):
-            bad_weight_count += 1
-            # If we cannot parse it, make the edge effectively unusable
-            data[weight_attr] = float("inf")
+            with zipfile.ZipFile(path, "r") as zf:
+                # If there's no calendar_dates.txt, we don't reject the feed:
+                # some GTFS feeds legitimately use calendar.txt only.
+                if "calendar_dates.txt" in zf.namelist():
+                    with zf.open("calendar_dates.txt") as f:
+                        reader = csv.reader(
+                            (line.decode("utf-8", errors="ignore") for line in f)
+                        )
+                        # Count non-empty, non-header rows
+                        row_count = 0
+                        header = next(reader, None)
+                        for row in reader:
+                            # Ignore completely empty rows
+                            if not any(cell.strip() for cell in row):
+                                continue
+                            row_count += 1
+                            if row_count > 0:
+                                break
 
-    if bad_weight_count or missing_weight_count:
-        logger.warning(
-            "nx_route_environment: sanitized '%s' on %d edges (bad) and %d edges (missing) "
-            "in routeenv='%s', mode='%s'",
-            weight_attr,
-            bad_weight_count,
-            missing_weight_count,
-            routeenv,
-            mode,
-        )
-    else:
-        logger.debug(
-            "nx_route_environment: no bad or missing '%s' issues in routeenv='%s', mode='%s'",
-            weight_attr,
-            routeenv,
-            mode,
-        )
+                    if row_count == 0:
+                        logger.warning(
+                            "Skipping GTFS feed with empty calendar_dates.txt: %s",
+                            path,
+                        )
+                        keep = False
 
-    # 3. Snap rep_points (GeoDataFrame) to nearest graph nodes
-    logger.info("Snapping %d representative points to network nodes", len(rep_points))
-    if "id" not in rep_points.columns:
-        raise ValueError("rep_points must have an 'id' column.")
+        except zipfile.BadZipFile:
+            logger.warning("Skipping malformed GTFS zip (BadZipFile): %s", path)
+            keep = False
+        except Exception as e:
+            # Don't be overly aggressive: log and keep the feed unless it's clearly bad
+            logger.error(
+                "Error while inspecting GTFS file '%s': %s. Keeping it for now.",
+                path,
+                e,
+            )
 
-    rep_ids = rep_points["id"].tolist()  # defines matrix order / labels
+        if keep:
+            valid.append(path)
 
-    xs = rep_points.geometry.x.values
-    ys = rep_points.geometry.y.values
-
-    snapped_node_ids = ox.distance.nearest_nodes(G, xs, ys)
-    snapped_node_ids = list(map(int, snapped_node_ids))  # ensure Python ints
-    logger.debug("Snapped points to %d unique network nodes", len(set(snapped_node_ids)))
-
-    if len(snapped_node_ids) != len(rep_ids):
-        raise RuntimeError(
-            "Mismatch between number of rep_points IDs and snapped nodes."
-        )
-
-    n = len(rep_ids)
-    mat = np.full((n, n), np.nan, dtype=float)
-
-    # Storage for path records (only if save_paths is not None)
-    path_records = [] if save_paths in ['csv', 'parquet'] else None
-    if save_paths in ['csv', 'parquet']:
-        logger.info("Will save path records for each O/D pair")
-
-    # Helper to choose a specific edge key between (u, v)
-    def _choose_edge_key(u, v):
-        """
-        For a given (u, v) in a MultiDiGraph, choose the edge key that Dijkstra
-        would have used: the one with minimal weight_attr.
-        """
-        edge_dict = G[u][v]  # dict: key -> data
-        # Find key with minimum traversal_time_sec (default to inf if missing)
-        best_key = None
-        best_weight = float("inf")
-        for k, data in edge_dict.items():
-            w = data.get(weight_attr, float("inf"))
-            if w < best_weight:
-                best_weight = w
-                best_key = k
-        return best_key
-
-    # 4. Compute single-source shortest-path lengths (and paths) from each origin
-    logger.info("Computing shortest paths for %d origins", len(snapped_node_ids))
-    for i, orig in tqdm(enumerate(snapped_node_ids), total=len(snapped_node_ids),
-                        desc=f"Routing {mode}"):
-        # This returns a dict of distances, and a dict of node-paths 
-        lengths, paths_nodes = nx.single_source_dijkstra(
-            G, orig, weight=weight_attr
-        )
-
-        # Fill row i for all destinations and, if requested, build path records
-        for j, dest in enumerate(snapped_node_ids):
-            if dest not in lengths:
-                continue
-
-            mat[i, j] = lengths[dest]
-
-            if save_paths:
-                # Node path from origin to dest
-                node_path = paths_nodes.get(dest)
-                if not node_path or len(node_path) < 2:
-                    continue
-
-                # Convert node path into (u, v, key) sequence
-                for seq_idx in range(len(node_path) - 1):
-                    u = node_path[seq_idx]
-                    v = node_path[seq_idx + 1]
-                    try:
-                        key = _choose_edge_key(u, v)
-                    except KeyError:
-                        # No edge between u and v (shouldn't happen if path is valid)
-                        key = None
-
-                    if key is None:
-                        continue
-
-                    path_records.append(
-                        {
-                            "origin_id": rep_ids[i],
-                            "dest_id": rep_ids[j],
-                            "seq_idx": seq_idx,
-                            "u": int(u),
-                            "v": int(v),
-                            "key": key,
-                        }
-                    )
-
-    # 5. Build DataFrame for travel times (minutes)
-    tt_df = pd.DataFrame(mat, index=rep_ids, columns=rep_ids)
-    tt_df /= 60.0  # seconds -> minutes
-
-    # Ensure output directories exist
-    os.makedirs(f"{scenario_dir}/routing/{routeenv}/raw_ttms/", exist_ok=True)
-    if save_paths:
-        os.makedirs(f"{scenario_dir}/routing/{routeenv}/paths/", exist_ok=True)
-
-    # Save TTM
-    tt_df.to_csv(raw_ttm_filename)
-    logger.info(
-        "Saved raw TTM for routeenv='%s', mode='%s' to '%s'",
-        routeenv,
-        mode,
-        raw_ttm_filename,
-    )
-
-    # Save paths in requested format
-    if save_paths in ['csv', 'parquet'] and path_records:
-        paths_df = pd.DataFrame(path_records)
-        if save_paths == 'parquet':
-            paths_df.to_parquet(paths_parquet_filename, index=False)
-            output_file = paths_parquet_filename
-        else:  # save_paths == 'csv'
-            paths_df.to_csv(paths_csv_filename, index=False)
-            output_file = paths_csv_filename
+    if len(valid) < len(gtfs_fullpaths):
         logger.info(
-            "Saved O/D path edge sequences for routeenv='%s', mode='%s' to '%s'",
-            routeenv,
-            mode,
-            output_file,
-        )
-    elif save_paths in ['csv', 'parquet']:
-        logger.warning(
-            "save_paths='%s' but no path records were generated for routeenv='%s', mode='%s'",
-            save_paths,
-            routeenv,
-            mode,
+            "Filtered GTFS feeds for r5py: %d valid, %d skipped",
+            len(valid),
+            len(gtfs_fullpaths) - len(valid),
         )
 
-    # Visualizations (if requested and if we have paths)
-    if visualize_routes and paths_df is not None:
-        communication.visualize_origin_paths(
-            G=G,
-            paths_df=paths_df,
-            tt_df=tt_df,
-            rep_points=rep_points,
-            scenario_dir=scenario_dir,
-            routeenv=routeenv,
-            mode=mode,
-            visualize_routes=visualize_routes,
-            weight_attr=weight_attr,
-        )
-
-    return tt_df
-
-
-def nx_route_environment_OLD(routeenv, mode, scenario_dir, rep_points, departure_time):
-    """
-    Load a GraphML network and compute an all-to-all travel-time matrix between rep_points.
-    # ... existing docstring ...
-    """
-
-    raw_ttm_filename = f"{scenario_dir}/routing/{routeenv}/raw_ttms/raw_ttm_{mode}.csv"
-    if os.path.exists(raw_ttm_filename):
-        logger.info("Found cached raw TTM for routeenv='%s', mode='%s' at '%s'",
-                    routeenv, mode, raw_ttm_filename)
-        ttm_wide = pd.read_csv(raw_ttm_filename, index_col=0)
-        ttm_wide.index = ttm_wide.index.astype(str)
-        ttm_wide.columns = ttm_wide.columns.astype(str)
-        return ttm_wide
-
-    # 1. Load graph
-    G = ox.load_graphml(f"{scenario_dir}/routing/{routeenv}/traffic/pre_benchmark/routing_graph.graphml")
-
-    # 2. Determine weight attribute
-    weight_attr = "traversal_time_sec"
-
-    # Ensure the weight attribute is numeric on all edges
-    bad_weight_count = 0
-    missing_weight_count = 0
-    for u, v, k, data in G.edges(keys=True, data=True):
-        if weight_attr not in data:
-            missing_weight_count += 1
-            # Treat missing weight as "impassable" for routing
-            data[weight_attr] = float("inf")
-            continue
-        val = data[weight_attr]
-        # Coerce to float if it's not already a clean number
-        try:
-            if not isinstance(val, (int, float)):
-                data[weight_attr] = float(val)
-        except (TypeError, ValueError):
-            bad_weight_count += 1
-            # If we cannot parse it, make the edge effectively unusable
-            data[weight_attr] = float("inf")
-
-    if bad_weight_count or missing_weight_count:
-        logger.warning(
-            "nx_route_environment: sanitized '%s' on %d edges (bad) and %d edges (missing) "
-            "in routeenv='%s', mode='%s'",
-            weight_attr, bad_weight_count, missing_weight_count, routeenv, mode
-        )
-    else:
-        logger.debug("nx_route_environment: no bad or missing '%s' issues in routeenv='%s', mode='%s'",
-                     weight_attr, routeenv, mode)
-
-    # 3. Snap rep_points (GeoDataFrame) to nearest graph nodes
-    # Extract IDs and coordinates
-    if "id" not in rep_points.columns:
-        raise ValueError("rep_points must have an 'id' column.")
-
-    rep_ids = rep_points["id"].tolist()  # will define matrix order / labels
-
-    xs = rep_points.geometry.x.values
-    ys = rep_points.geometry.y.values
-
-    snapped_node_ids = ox.distance.nearest_nodes(G, xs, ys)
-    snapped_node_ids = list(map(int, snapped_node_ids))  # ensure Python ints
-
-    # Optional: sanity check for same length
-    if len(snapped_node_ids) != len(rep_ids):
-        raise RuntimeError("Mismatch between number of rep_points IDs and snapped nodes.")
-
-    n = len(rep_ids)
-    mat = np.full((n, n), np.nan, dtype=float)
-
-    # 4. Compute single-source shortest-path lengths from each origin
-    #    This is O(N * Dijkstra), so keep an eye on N for performance.
-    for i, orig in enumerate(snapped_node_ids):
-        lengths = nx.single_source_dijkstra_path_length(G, orig, weight=weight_attr)
-        # Fill row i for all destinations
-        for j, dest in enumerate(snapped_node_ids):
-            if dest in lengths:
-                mat[i, j] = lengths[dest]
-
-    # 5. Build DataFrame
-    tt_df = pd.DataFrame(mat, index=rep_ids, columns=rep_ids)
-
-    # convert from seconds to minutes
-    tt_df /= 60
-
-    os.makedirs(f"{scenario_dir}/routing/{routeenv}/raw_ttms/", exist_ok=True)
-    tt_df.to_csv(raw_ttm_filename)
-    logger.info("Saved raw TTM for routeenv='%s', mode='%s' to '%s'",
-                routeenv, mode, raw_ttm_filename)
-    return tt_df
+    return valid
 
 def r5py_route_environment(routeenv, mode, scenario_dir, rep_points, departure_time):
 
@@ -393,9 +136,21 @@ def r5py_route_environment(routeenv, mode, scenario_dir, rep_points, departure_t
         return ttm_wide
 
     logger.info("Routing %s for %s", mode, routeenv)
-    gtfs_files = os.listdir(f"{scenario_dir}/routing/{routeenv}/gtfs_files")
-    gtfs_fullpaths = [f"{scenario_dir}/routing/{routeenv}/gtfs_files/{filename}" for filename in gtfs_files]
-    logger.debug("Using %d GTFS files for routeenv='%s'", len(gtfs_fullpaths), routeenv)
+    if os.path.exists(f"{scenario_dir}/routing/{routeenv}/gtfs_files"):
+        gtfs_files = os.listdir(f"{scenario_dir}/routing/{routeenv}/gtfs_files")
+        gtfs_fullpaths = [f"{scenario_dir}/routing/{routeenv}/gtfs_files/{filename}" for filename in gtfs_files]
+        logger.debug("Using %d GTFS files for routeenv='%s'", len(gtfs_fullpaths), routeenv)
+    else:
+        gtfs_fullpaths = []
+
+    # Filter out GTFS feeds that are known to break r5py (e.g. empty calendar_dates)
+    gtfs_fullpaths = _filter_invalid_gtfs_for_r5py(gtfs_fullpaths)
+    if not gtfs_fullpaths:
+        logger.warning(
+            "No valid GTFS feeds remain for routeenv='%s' after filtering. "
+            "Transit routing may be disabled for this environment.",
+            routeenv,
+        )
 
     # load r5 params
     with open(f"{scenario_dir}/routing/{routeenv}/r5_params.json") as f:
@@ -409,11 +164,17 @@ def r5py_route_environment(routeenv, mode, scenario_dir, rep_points, departure_t
             osm_pbf=f"{scenario_dir}/routing/{routeenv}/osm_file.pbf",
             gtfs=gtfs_fullpaths,
         )
-    except ValueError as e:
-        logger.error("Error loading network for routeenv='%s': %s", routeenv, e)
+    except Exception as e:
+        # r5py can raise GtfsFileError or ValueError or others; log clearly
+        logger.error(
+            "Error loading r5py.TransportNetwork for routeenv='%s' with GTFS=%s: %s",
+            routeenv,
+            gtfs_fullpaths,
+            e,
+        )
         print(f"Error loading network for {routeenv}: {e}")
-        print("TRY EMPTYING YOUR CACHE /home/user/.cache/r5py/*")
-        raise e
+        print("If this persists, you may need to inspect or regenerate GTFS feeds for this routeenv.")
+        raise
 
     # route on network to create travel time matrix
     logger.info("Calculating travel time matrix for routeenv='%s', mode='%s'", routeenv, mode)
@@ -460,9 +221,10 @@ def route_for_all_envs(scenario_dir: str,
                        user_classes: pd.DataFrame,
                        departure_time = DEPARTURE_TIME,
                        visualize_all = True,
+                       track_volumes = None,
                        ):
     """Route for all environments and modes.
-    
+
     Args:
         scenario_dir: Directory for scenario
         geoms_with_dests: GeoDataFrame with destinations (any CRS, will be converted to WGS84)
@@ -479,13 +241,13 @@ def route_for_all_envs(scenario_dir: str,
         logger.info("Converting geoms_with_dests from %s to EPSG:4326", geoms_with_dests.crs)
         print(f"Converting geoms_with_dests from {geoms_with_dests.crs} to EPSG:4326")
         geoms_with_dests = geoms_with_dests.to_crs("EPSG:4326")
-    
+
     # Create representative points in WGS84
     logger.info("Creating representative points from geoms_with_dests")
     rep_points = gpd.GeoDataFrame(crs="EPSG:4326", geometry=geoms_with_dests.representative_point())
     rep_points['id'] = geoms_with_dests['geom_id'].astype(str)
     logger.debug("rep_points created with %d points", len(rep_points))
-    
+
     rep_points.to_file(f"{scenario_dir}/routing/DEBUG: rep_points.geojson", driver="GeoJSON")
     logger.info("Saved DEBUG rep_points.geojson for scenario_dir='%s'", scenario_dir)
 
@@ -499,28 +261,52 @@ def route_for_all_envs(scenario_dir: str,
         logger.debug("Route environments for mode='%s': %s", mode, route_envs_for_mode)
         print(f"routeenvs for {mode}: {route_envs_for_mode}")
         for routeenv in route_envs_for_mode:
-            logger.info("Routing mode='%s' in routeenv='%s'", mode, routeenv)
             user_class_selection = user_classes[user_classes[f'routeenv_{mode}'] == routeenv]
             logger.debug("Selected %d user classes for mode='%s', routeenv='%s'",
                          len(user_class_selection), mode, routeenv)
-
-            if mode == "CAR":
-                raw_ttm = nx_route_environment(routeenv, mode, scenario_dir, rep_points, departure_time)
+            if not os.path.exists(f"{scenario_dir}/routing/{routeenv}/raw_ttms/raw_ttm_{mode}.csv"):
+                logger.info("Routing mode='%s' in routeenv='%s'", mode, routeenv)
+                if mode == "CAR":
+                    # TODO add some logic here about when to do ordinary OD TTM, checkpoint TTM, or capture paths
+                    if bool(track_volumes):
+                        raw_ttm, length_df, checkpoint_bool_df = car_routing.od_matrix_times_with_checkpoints(
+                            scenario_dir,
+                            routeenv,
+                            rep_points,
+                            mode,
+                            departure_time,
+                            checkpoint_node_ids=track_volumes['checkpoint_node_ids'],
+                            checkpoint_edge_attr=track_volumes['checkpoint_edge_attr'],
+                            checkpoint_edge_values=track_volumes['checkpoint_edge_values'],
+                            )
+                    else:
+                        raw_ttm = car_routing.od_matrix_times(
+                            scenario_dir,
+                            routeenv,
+                            rep_points,
+                            mode,
+                            departure_time,
+                        )
+                else:
+                    raw_ttm = r5py_route_environment(routeenv, mode, scenario_dir, rep_points, departure_time)
             else:
-                raw_ttm = r5py_route_environment(routeenv, mode, scenario_dir, rep_points, departure_time)
-
-            post_process_matrices(scenario_dir, raw_ttm, mode, user_class_selection, geoms_with_dests) #this also saves the files
-            logger.info("Finished post-processing for mode='%s', routeenv='%s'", mode, routeenv)
+                logger.debug("Found existing raw_ttm for mode='%s', routeenv='%s'", mode, routeenv)
+                raw_ttm = pd.read_csv(f"{scenario_dir}/routing/{routeenv}/raw_ttms/raw_ttm_{mode}.csv", index_col=0)
+            user_class_example = user_class_selection.user_class_id.iloc[0]
+            if not os.path.exists(f"{scenario_dir}/impedances/{user_class_example}/gtm_{mode}.csv"):
+                post_process_matrices(scenario_dir, raw_ttm, mode, user_class_selection, geoms_with_dests) #this also saves the files
+                logger.info("Finished post-processing for mode='%s', routeenv='%s'", mode, routeenv)
 
             if visualize_all:
                 geoms_with_dests.index = geoms_with_dests['geom_id'].values
                 logger.info("Creating visualization for mode='%s', routeenv='%s'", mode, routeenv)
-                communication.visualize_access_to_zone(scenario_dir,
-                                                       geoms_with_dests,
-                                                       f"{scenario_dir}/routing/{routeenv}/route_{mode}_raw_traveltime_viz.html",
-                                                       raw_ttm,
-                                                       target_zone_id=None,
-                                                       )
+                #TODO fix this communication call
+                # communication.visualize_access_to_zone(scenario_dir,
+                #                                        geoms_with_dests,
+                #                                        f"{scenario_dir}/routing/{routeenv}/route_{mode}_raw_traveltime_viz.html",
+                #                                        raw_ttm,
+                #                                        target_zone_id=None,
+                #                                        )
 
 ###
 # routing support utils

@@ -199,7 +199,21 @@ def make_radio_choropleth_map(
     gdf, column_mapping = _coerce_and_prettify_numeric_columns(gdf, exclude_cols=exclude)
 
     if columns_to_viz is not None:
-        columns_to_viz =[column_mapping[x] for x in columns_to_viz]
+        # Remap only those columns that were actually renamed by _coerce_and_prettify_numeric_columns.
+        # Non-numeric or untouched columns (e.g., 'name') are passed through unchanged.
+        remapped_cols = []
+        for col in columns_to_viz:
+            if col in column_mapping:
+                remapped_cols.append(column_mapping[col])
+            else:
+                # Keep the original name and log a warning once per missing mapping.
+                logger.warning(
+                    "make_radio_choropleth_map: column '%s' not found in numeric column_mapping; "
+                    "using original name. This is expected for non-numeric columns like labels.",
+                    col,
+                )
+                remapped_cols.append(col)
+        columns_to_viz = remapped_cols
 
     # 2) Determine numeric columns
     auto_numeric = [c for c in gdf.columns if c != gdf.geometry.name and pd.api.types.is_numeric_dtype(gdf[c])]

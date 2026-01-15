@@ -33,6 +33,7 @@ import json
 import math
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Any, Union
+from collections import deque
 
 import networkx as nx
 import osmnx as ox
@@ -44,7 +45,6 @@ import shapely
 from tqdm import tqdm
 from difflib import SequenceMatcher
 
-
 logging.basicConfig(
     level=logging.INFO,              # or DEBUG
     format="%(asctime)s %(levelname)s %(message)s"
@@ -52,6 +52,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TRAFFIC_PARAMS_PATH = Path(__file__).with_name("traffic_analysis_parameters.json")
+
+#minizing list for memory efficiency
+custom_tags = ['access', 'area', 'highway', 'lanes', 'maxspeed', 'name', 'oneway', 'ref', 'service', 'toll', 'bicycle']
+ox.settings.useful_tags_way = custom_tags
 
 @lru_cache()
 def load_traffic_params(path: str | Path = TRAFFIC_PARAMS_PATH) -> Dict[str, Any]:
@@ -425,35 +429,42 @@ def edges_from_graph(
 # ---------------------------------------------------------------------------
 # OSM loading & drive-like filtering
 # ---------------------------------------------------------------------------
-
-def get_osm_graph(osm_filepath: str) -> nx.MultiDiGraph:
+def get_osm_graph(
+    osm_filepath: str,
+    filtered_osm_filepath: str,
+    *,
+    include_residential: bool = False,
+    include_unclassified: bool = False,
+    include_living_street: bool = False,
+    include_road: bool = False,
+    include_service: bool = False,
+) -> nx.MultiDiGraph:
     """
-    Load an OSM graph from XML (.osm or .osm.pbf) and filter it to a
-    car-drivable network, using a heuristic similar to osmnx's
-    network_type='drive':
+    Stream-filter an OSM XML/PBF file to a new .osm XML extract using osmium,
+    then load it into a NetworkX MultiDiGraph via OSMnx.
 
-      - Keep major/minor roads and most service roads.
-      - Include living_street and road, but not busway or raceway.
-      - Drop footways, cycleways, tracks, etc. where cars are obviously not allowed.
-      - Drop ways where access/motor_vehicle/motorcar == 'no'.
-      - Drop some service=* values like parking_aisle, driveway, drive-through, etc.
-      - Preserve all other tags and do a conservative pruning of isolated nodes.
-      - Retain all connected components (retain_all=True behavior).
+    This avoids constructing the full graph in memory before filtering, but it
+    does keep an in-memory set of node IDs referenced by kept ways.
+
+    Parameters
+    ----------
+    osm_filepath : str
+        Input .osm or .osm.pbf file.
+    filtered_osm_filepath : str
+        Output .osm file path to write the filtered extract to.
+    include_residential, include_unclassified, include_living_street, include_road, include_service : bool
+        Whether to include those highway classes and (for service) any way with service=*.
 
     Returns
     -------
     nx.MultiDiGraph
-        Subgraph containing only drivable edges (and their nodes).
+        Drivable graph built from the filtered extract.
     """
-    logger.info(
-        "Loading OSM graph from '%s' (highway + access-related tags)", osm_filepath
-    )
-    G = ox.graph_from_xml(
-        osm_filepath,
-        retain_all=True,
-    )
+    import osmium as osm
 
-    # Define which highway values are considered clearly drivable
+    logger.info("Streaming-filtering OSM input '%s' -> '%s'", osm_filepath, filtered_osm_filepath)
+
+    # Base drivable set (always-on)
     drivable_highways = {
         "motorway",
         "motorway_link",
@@ -465,14 +476,20 @@ def get_osm_graph(osm_filepath: str) -> nx.MultiDiGraph:
         "secondary_link",
         "tertiary",
         "tertiary_link",
-        "residential",
-        "unclassified",
-        "service",
-        "living_street",
-        "road",
     }
+    # Optional classes
+    if include_residential:
+        drivable_highways.add("residential")
+    if include_unclassified:
+        drivable_highways.add("unclassified")
+    if include_living_street:
+        drivable_highways.add("living_street")
+    if include_road:
+        drivable_highways.add("road")
+    if include_service:
+        drivable_highways.add("service")
 
-    # Highway values that are clearly not car-drivable and should be removed
+    # Explicitly non-drivable highway types
     non_drivable_highways = {
         "cycleway",
         "footway",
@@ -488,80 +505,116 @@ def get_osm_graph(osm_filepath: str) -> nx.MultiDiGraph:
         "raceway",
         "platform",
     }
+    # Only treat service as non-drivable when we are not including it
+    if not include_service:
+        non_drivable_highways.add("service")
+    if not include_residential:
+        non_drivable_highways.add("residential")
 
-    # Service values that we do NOT want to keep, following osmnx-like behavior
-    excluded_service_values = {
-        "parking_aisle",
-        "driveway",
-        "drive-through",
-        "emergency_access",
-    }
+    def _split_hwy_values(hwy_val: str) -> list[str]:
+        # OSM commonly stores multiple highway values as "foo;bar"
+        parts = [p.strip().lower() for p in str(hwy_val).split(";")]
+        return [p for p in parts if p]
 
-    def _is_drivable_edge(data: dict) -> bool:
+    def _tag_value(tags: osm.osm.Tags, key: str) -> str | None:
+        # pyosmium tags behave like a mapping
+        try:
+            v = tags.get(key)
+        except Exception:
+            v = None
+        return v
+
+    def _is_drivable_way(w: osm.osm.Way) -> bool:
         """
-        Decide if an edge is part of the drivable network.
-
-        Conservative bias: if in doubt and not explicitly non-drivable,
-        we keep the edge.
+        Decide if a WAY is part of the drivable network.
+        Conservative bias: if in doubt and not explicitly excluded, keep it.
         """
+        tags = w.tags
+
         # Access restrictions: drop explicit "no" for cars
-        for tag in ("access", "motor_vehicle", "motorcar"):
-            val = data.get(tag)
-            if isinstance(val, list):
-                vals = [str(v).lower() for v in val]
-                if any(v == "no" for v in vals):
-                    return False
-            elif val is not None:
-                if str(val).lower() == "no":
-                    return False
+        for key in ("access", "motor_vehicle", "motorcar"):
+            val = _tag_value(tags, key)
+            if val is not None and str(val).strip().lower() == "no":
+                return False
 
-        # Highway classification
-        hwy = data.get("highway")
+        # If service=* exists and we are excluding service, drop
+        if not include_service:
+            svc = _tag_value(tags, "service")
+            if svc is not None and str(svc).strip() != "":
+                return False
+
+        hwy = _tag_value(tags, "highway")
         if hwy is None:
             # No highway tag: keep (conservative)
             return True
 
-        if isinstance(hwy, (list, set, tuple)):
-            hwy_vals = [str(v).lower() for v in hwy]
-        else:
-            hwy_vals = [str(hwy).lower()]
+        hwy_vals = _split_hwy_values(hwy)
 
         # Explicitly non-drivable highway types
         if any(v in non_drivable_highways for v in hwy_vals):
             return False
 
-        # Service=* refinements (only meaningful if highway is service or similar)
-        service_val = str(data.get("service", "")).lower()
-        if "service" in hwy_vals and service_val in excluded_service_values:
-            return False
-
-        # If this looks like a typical drivable highway, keep it
+        # Typical drivable highway types
         if any(v in drivable_highways for v in hwy_vals):
             return True
 
-        # Otherwise, unknown/rare highway value: keep (conservative),
-        # unless clearly excluded by other logic above.
+        # Unknown/rare highway value: keep (conservative)
         return True
 
-    edges_to_remove = []
+    # -------------------------
+    # Pass 1: collect kept ways + required node IDs
+    # -------------------------
+    kept_way_ids: set[int] = set()
+    needed_node_ids: set[int] = set()
 
-    for u, v, k, data in G.edges(keys=True, data=True):
-        if not _is_drivable_edge(data):
-            edges_to_remove.append((u, v, k))
+    class Pass1(osm.SimpleHandler):
+        def way(self, w):
+            if _is_drivable_way(w):
+                kept_way_ids.add(w.id)
+                for n in w.nodes:
+                    needed_node_ids.add(n.ref)
+
+    logger.info("Pass 1/2: scanning ways + collecting referenced node IDs")
+    Pass1().apply_file(osm_filepath, locations=False)
 
     logger.info(
-        "Filtering drivable network: removing %d of %d edges",
-        len(edges_to_remove),
-        G.number_of_edges(),
+        "Pass 1 complete: kept %d ways; referenced %d nodes",
+        len(kept_way_ids),
+        len(needed_node_ids),
     )
-    G.remove_edges_from(edges_to_remove)
+
+    # -------------------------
+    # Pass 2: write nodes + ways to filtered output
+    # -------------------------
+    writer = osm.SimpleWriter(filtered_osm_filepath)
+
+    class Pass2(osm.SimpleHandler):
+        def node(self, n):
+            if n.id in needed_node_ids:
+                writer.add_node(n)
+
+        def way(self, w):
+            if w.id in kept_way_ids:
+                writer.add_way(w)
+
+        # Relations are typically not required for drivable graphs.
+        # If you later discover you need them (rare for routing),
+        # you can implement relation() similarly.
+
+    logger.info("Pass 2/2: writing filtered extract to '%s'", filtered_osm_filepath)
+    Pass2().apply_file(osm_filepath, locations=False)
+    writer.close()
+
+    # -------------------------
+    # Load filtered extract into a graph
+    # -------------------------
+    logger.info("Loading filtered OSM graph from '%s'", filtered_osm_filepath)
+    G = ox.graph_from_xml(filtered_osm_filepath, retain_all=True)
 
     # Prune isolated nodes (degree 0) conservatively
     isolated_nodes = [n for n, deg in G.degree() if deg == 0]
     if isolated_nodes:
-        logger.info(
-            "Removing %d isolated nodes after edge filtering", len(isolated_nodes)
-        )
+        logger.info("Removing %d isolated nodes after filtering", len(isolated_nodes))
         G.remove_nodes_from(isolated_nodes)
 
     logger.info(
@@ -569,9 +622,7 @@ def get_osm_graph(osm_filepath: str) -> nx.MultiDiGraph:
         G.number_of_nodes(),
         G.number_of_edges(),
     )
-
     return G
-
 
 
 # ---------------------------------------------------------------------------
@@ -629,7 +680,114 @@ def compute_match_score(
 
     return score, overlap_ratio, bearing_diff, name_score
 
+#new LLM attempt
+def untested_match_tomtom_to_osm(
+    tt_gdf: gpd.GeoDataFrame,
+    osm_edges: gpd.GeoDataFrame,
+    cfg: MatchConfig,
+) -> pd.DataFrame:
+    """
+    For each TomTom segment, find the best-matching OSM edge using
+    spatial + attribute scoring. Returns a DataFrame of matches with:
 
+        segmentId, newSegmentId_str, edge_id, score, overlap_ratio,
+        bearing_diff, name_score
+
+    Efficiency notes (accuracy-preserving):
+    - Reuses the OSM spatial index (and a few invariants) across calls for the
+      *same* `osm_edges` object, so running twice with different TomTom datasets
+      does not rebuild the index.
+    - Avoids constructing shapely boxes; queries the spatial index by bounds.
+    - Avoids copying candidate slices and avoids pandas iterrows on candidates.
+    """
+    # ---- lightweight per-process cache keyed by the *object identity* of osm_edges ----
+    # This is intentionally identity-based: it avoids expensive hashing and works well
+    # when you reuse the same GeoDataFrame across multiple runs.
+    global _MATCH_TT_OSM_CACHE  # type: ignore
+    try:
+        _MATCH_TT_OSM_CACHE
+    except NameError:
+        _MATCH_TT_OSM_CACHE = {}
+
+    cache_key = (id(osm_edges), float(cfg.max_candidate_distance_m))
+    cached = _MATCH_TT_OSM_CACHE.get(cache_key)
+
+    # If `osm_edges` is reused but replaced/rebuilt, id() will differ and we rebuild cache.
+    # If `osm_edges` is mutated in-place between calls, you should manually clear the cache
+    # (restart process) to guarantee consistency.
+    if cached is None:
+        cached = {
+            "sindex": osm_edges.sindex,
+            # distance normalization is a function of cfg only
+            "dist_norm_den": 2.0 * float(cfg.max_candidate_distance_m),
+        }
+        _MATCH_TT_OSM_CACHE[cache_key] = cached
+
+    sindex = cached["sindex"]
+    dist_norm_den = cached["dist_norm_den"]
+
+    buff = float(cfg.max_candidate_distance_m)
+
+    match_rows: List[Dict[str, Any]] = []
+
+    # Keep tt_row as a Series (for compute_match_score compatibility), but avoid iterrows().
+    # itertuples is faster; we then pull the Series by index only for rows we will process.
+    # This typically reduces overhead substantially at large N.
+    tt_index = tt_gdf.index
+
+    for i, row_key in enumerate(tqdm(tt_index, total=len(tt_gdf), desc="Matching TT→OSM")):
+        tt_row = tt_gdf.loc[row_key]
+        geom = tt_row.geometry
+        if geom is None or geom.is_empty:
+            continue
+
+        # Query by expanded bounds (no shapely.box construction).
+        minx, miny, maxx, maxy = geom.bounds
+        query_bounds = (minx - buff, miny - buff, maxx + buff, maxy + buff)
+
+        # sindex.intersection returns an iterator of positional indices for GeoPandas R-tree
+        candidate_pos_idx = list(sindex.intersection(query_bounds))
+        if not candidate_pos_idx:
+            continue
+
+        best_score = -1e9
+        best_edge_id = None
+        best_overlap = 0.0
+        best_bearing_diff = 180.0
+        best_name_score = 0.0
+
+        # Iterate positional indices directly; avoid candidates = osm_edges.iloc[..].copy()
+        for pos in candidate_pos_idx:
+            osm_row = osm_edges.iloc[pos]
+            score, overlap_ratio, bearing_diff, name_score = compute_match_score(
+                tt_row, osm_row, cfg, dist_norm_den=dist_norm_den
+            )
+            if score > best_score:
+                best_score = score
+                best_edge_id = osm_row.get("edge_id", None)
+                best_overlap = overlap_ratio
+                best_bearing_diff = bearing_diff
+                best_name_score = name_score
+
+        if best_edge_id is None or best_score < cfg.score_threshold:
+            continue
+
+        match_rows.append(
+            {
+                "segmentId": tt_row["segmentId"],
+                "newSegmentId_str": tt_row["newSegmentId_str"],
+                "edge_id": best_edge_id,
+                "score": best_score,
+                "overlap_ratio": best_overlap,
+                "bearing_diff": best_bearing_diff,
+                "name_score": best_name_score,
+            }
+        )
+
+    return pd.DataFrame(match_rows)
+
+
+#old, tested, works
 def match_tomtom_to_osm(
     tt_gdf: gpd.GeoDataFrame,
     osm_edges: gpd.GeoDataFrame,
@@ -712,12 +870,13 @@ def aggregate_speeds_to_edges(
     tt_gdf: gpd.GeoDataFrame,
     matches_df: pd.DataFrame,
     osm_edges: gpd.GeoDataFrame,
+    sample_size_out_attr: str = "tomtom_sample_size",
 ) -> gpd.GeoDataFrame:
     """
     Aggregate TomTom speeds to OSM edges AND attach an aggregate sample size.
     Writes:
       - existing speed columns (avgSpeed_*, harmSpeed_*)
-      - tomtom_sample_size  (length-weighted effective sample size)
+      - sample_size_out_attr (length-weighted effective sample size)
     """
     tt_with_match = tt_gdf.merge(
         matches_df[["newSegmentId_str", "edge_id", "score", "overlap_ratio"]],
@@ -764,9 +923,9 @@ def aggregate_speeds_to_edges(
         if eff_samples:
             S = np.concatenate(eff_samples)
             W = np.concatenate(eff_weights)
-            rec["tomtom_sample_size"] = float(np.sum(S * (W / W.sum())))
+            rec[sample_size_out_attr] = float(np.sum(S * (W / W.sum())))
         else:
-            rec["tomtom_sample_size"] = np.nan
+            rec[sample_size_out_attr] = np.nan
 
         agg_records.append(rec)
 
@@ -805,31 +964,47 @@ def default_speed_from_highway(highway: Any, fallback: float = 30.0) -> float:
     return table.get(h, fallback)
 
 
-
 def _normalize_highway(value: Union[str, list, None]) -> Union[str, None]:
     if isinstance(value, list) and value:
         return value[0]
     return value
 
 
-def _parse_lanes(val: Union[str, int, float, None]) -> Union[int, None]:
+def _parse_lanes(val: Union[str, int, float, None],
+                 how="min" #min or max
+                 )-> Union[int, None]:
     if val is None:
         return None
     try:
         if isinstance(val, (int, float)):
             return int(round(val))
+        if type(val) is list:
+            val = [float(x) for x in val]
+            if how == "min":
+                return int(round(min(val)))
+            if how == "max":
+                return int(round(max(val)))
         parts = [p.strip() for p in str(val).split(";") if p.strip()]
         nums = []
         for p in parts:
             try:
                 nums.append(float(p))
             except ValueError:
+                import pdb; pdb.set_trace()
                 continue
         if not nums:
             return None
-        return int(round(max(nums)))
+        if how == "min":
+            if len(nums) > 1:
+                import pdb; pdb.set_trace()
+            return int(round(min(nums)))
+        if how == "max":
+            return int(round(max(nums)))
+        else:
+            raise ValueError(f"Invalid how={how!r}")
     except Exception as e:
         logger.debug(f"Could not parse lanes='{val}': {e}")
+        import pdb; pdb.set_trace()
         return None
 
 
@@ -885,23 +1060,123 @@ def _parse_maxspeed_to_kph(val: Union[str, int, float, list, None]) -> Union[flo
         return None
 
 
-def _classify_functional_class(hwy: Union[str, None], params: Dict[str, Any]) -> str:
+def _classify_functional_class(hwy: Union[str, None],
+                               dir_lanes: int,
+                               params: Dict[str, Any],
+                               ) -> str:
     h = (hwy or "").lower()
     fcs = params["functional_classes"]
     for name, cfg in fcs.items():
         tags = {t.lower() for t in cfg.get("osm_highway_tags", [])}
+        min_lanes = cfg.get("min_lanes_per_direction", 0) #deprecated for now because it was causing ramps to be classified as local. Could re-include later.
         if h in tags:
-            return name
+            if dir_lanes >= min_lanes:
+                return name
     return "local" if "local" in fcs else next(iter(fcs.keys()))
+
+
+def _propagate_signal_tag(G: nx.MultiDiGraph, length: float = 300.0) -> nx.MultiDiGraph:
+    """
+    Mark edges that are upstream of traffic signals within a given network distance.
+
+    For every node with highway=traffic_signal or highway=traffic_signals, walk
+    *against* edge direction along predecessors, accumulating edge 'length'
+    (meters). Any edge whose downstream endpoint can reach a signal node within
+    `length` meters is tagged with edge['near_signal'] = True.
+
+    The function:
+      - respects directed edge orientation (u -> v is traffic flow)
+      - avoids infinite loops by tracking the best (shortest) distance seen per node
+      - does not clear existing 'near_signal' flags; it only sets them to True
+
+    Args:
+        G: Directed MultiDiGraph with edge attribute 'length' in meters.
+        length: Maximum upstream network distance (meters) from a signal node.
+
+    Returns:
+        The same graph object, mutated in place.
+    """
+
+    def _node_is_signal(node_data: dict) -> bool:
+        h = node_data.get("highway")
+        if h is None:
+            return False
+        if isinstance(h, (list, tuple, set)):
+            return any(x in {"traffic_signal", "traffic_signals"} for x in h)
+        return h in {"traffic_signal", "traffic_signals"}
+
+    # Collect all signal nodes
+    signal_nodes = [n for n, data in G.nodes(data=True) if _node_is_signal(data)]
+    n_signals = len(signal_nodes)
+    logger.info(
+        "_propagate_signal_tag: found %d signal nodes (length_cutoff=%.1f m)",
+        n_signals,
+        length,
+    )
+
+    if not signal_nodes:
+        return G
+
+    n_edges_marked_before = sum(
+        1 for _, _, _, d in G.edges(keys=True, data=True) if d.get("near_signal", False)
+    )
+    total_new_marked = 0
+
+    # Iterate over signals with progress bar
+    for sig_node in tqdm(signal_nodes, desc="Propagating near_signal from traffic lights"):
+        # best_dist[n] = shortest upstream distance (m) from sig_node to n
+        best_dist = {sig_node: 0.0}
+        q = deque([(sig_node, 0.0)])
+
+        while q:
+            cur_node, cur_dist = q.popleft()
+
+            # Walk *upstream*: incoming edges to cur_node
+            for u, v, k, edata in G.in_edges(cur_node, keys=True, data=True):
+                edge_len = edata.get("length", 0.0)
+                try:
+                    edge_len = float(edge_len)
+                except (TypeError, ValueError):
+                    edge_len = 0.0
+
+                new_dist = cur_dist + edge_len
+                if new_dist > length:
+                    continue
+
+                # Mark this edge as being near a signal
+                if not edata.get("near_signal", False):
+                    edata["near_signal"] = True
+                    total_new_marked += 1
+
+                # If we've already reached u with a shorter distance, skip
+                prev = best_dist.get(u)
+                if prev is not None and prev <= new_dist:
+                    continue
+
+                best_dist[u] = new_dist
+                q.append((u, new_dist))
+
+    n_edges_marked_after = sum(
+        1 for _, _, _, d in G.edges(keys=True, data=True) if d.get("near_signal", False)
+    )
+    logger.info(
+        "_propagate_signal_tag: marked %d additional edges as near_signal "
+        "(total now %d, previously %d)",
+        total_new_marked,
+        n_edges_marked_after,
+        n_edges_marked_before,
+    )
+
+    return G
 
 
 def add_osm_default_freeflowspeed_and_capacity(
     G: nx.MultiDiGraph,
     capacity_attr: str = "capacity_vph",
     capacity_source_attr: str = "capacity_source",
-    max_lanes: int = 6,
     speed_attr: str = "ff_speed_kph",
     ff_speed_source_attr: str = "ff_speed_source",
+    osm_maxspeed_attr: str = "osm_maxspeed_kph",
     alpha_attr: str = "vdf_alpha",
     beta_attr: str = "vdf_beta",
     func_class_attr: str = "functional_class",
@@ -920,23 +1195,13 @@ def add_osm_default_freeflowspeed_and_capacity(
     lanes_defaults = params.get("default_dir_lanes_by_highway", {}) or {}
     cap_defaults = params.get("capacity_per_lane_by_highway", {}) or {}
     default_cap_per_lane = int(cap_defaults.get("default", 1000))
-
-    # Precompute signal nodes (O(N))
-    def _node_is_signal(nd: dict) -> bool:
-        val = nd.get("highway")
-        if val is None:
-            return False
-        if isinstance(val, (list, tuple, set)):
-            vals = [str(x).lower() for x in val]
-        else:
-            vals = [str(val).lower()]
-        return any(x in ("traffic_signals", "traffic_signal") for x in vals)
-
-    signal_nodes = {n for n, nd in G.nodes(data=True) if _node_is_signal(nd)}
-
+    custom_capacities = params['custom_capacities']
 
     # Global fallback if a FC omits it
     signal_factor_default = float(params.get("signal_capacity_factor_default", 0.6))
+
+    G = _propagate_signal_tag(G)
+
 
     for u, v, k, data in G.edges(keys=True, data=True):
         hwy = _normalize_highway(data.get("highway"))
@@ -957,10 +1222,6 @@ def add_osm_default_freeflowspeed_and_capacity(
             dir_lanes = int(lanes_defaults.get(hwy, lanes_defaults.get("local", 1)))
             cap_source_bits.append("default_dir_lanes")
 
-        if dir_lanes > max_lanes:
-            dir_lanes = max_lanes
-            cap_source_bits.append(f"capped_at_{max_lanes}")
-
         # Per-lane capacity
         cap_per_lane = int(cap_defaults.get(hwy, default_cap_per_lane))
         if hwy not in cap_defaults:
@@ -968,21 +1229,29 @@ def add_osm_default_freeflowspeed_and_capacity(
 
         capacity = dir_lanes * cap_per_lane
 
+
         # Functional class + VDF params
-        fc_name = _classify_functional_class(hwy, params)
+        fc_name = _classify_functional_class(hwy, dir_lanes, params)
+
         fc_cfg = params["functional_classes"][fc_name]
         alpha = float(fc_cfg["alpha"])
         beta = float(fc_cfg["beta"])
 
-        # Signal-end reduction (only check v, per your requirement)
+        # Signal-end reduction
         signal_factor = float(fc_cfg.get("signal_capacity_factor", signal_factor_default))
-        if v in signal_nodes and signal_factor != 1.0:
+        if (
+                ("near_signal" in data.keys() and data['near_signal'] == True and signal_factor != 1.0)
+                or
+                (fc_cfg["always_treat_as_signalized"] == 1)
+            ):
             capacity = int(round(capacity * signal_factor))
             cap_source_bits.append(f"signal_factor_{signal_factor:g}")
 
         # Free-flow speed
         speed_source_bits: list[str] = []
         maxspeed_kph = _parse_maxspeed_to_kph(data.get("maxspeed"))
+        # Persist parsed maxspeed (even if not selected as free-flow speed)
+        data[osm_maxspeed_attr] = float(maxspeed_kph) if maxspeed_kph is not None else None
         if maxspeed_kph is not None:
             freeflow_speed = float(maxspeed_kph)
             speed_source_bits.append("osm_maxspeed")
@@ -990,10 +1259,26 @@ def add_osm_default_freeflowspeed_and_capacity(
             freeflow_speed = float(default_speed_from_highway(hwy))
             speed_source_bits.append("default_speed_from_highway")
 
+        #overwrite for custom capacities
+        for custom_ref in custom_capacities.keys():
+            if 'ref' in data.keys():
+                if custom_ref in data['ref']:
+                    capacity = custom_capacities[custom_ref]
+                    speed_source_bits.append(f"custom_capacity_{custom_ref}")
+
         # Write attributes
+        data['osm_lanes'] = data.get("lanes")
+        data['lanes'] = dir_lanes
+        data[capacity_attr] = capacity
+        data[capacity_source_attr] = "|".join(cap_source_bits)
+        data[speed_attr] = freeflow_speed
+        data[ff_speed_source_attr] = "|".join(speed_source_bits)
+        data[alpha_attr] = alpha
+        data[beta_attr] = beta
         data[capacity_attr] = int(capacity)
         data[capacity_source_attr] = "+".join(cap_source_bits) if cap_source_bits else "unspecified"
         data[speed_attr] = freeflow_speed
+        data['osm_freeflow_speed'] = freeflow_speed
         data[ff_speed_source_attr] = "+".join(speed_source_bits) if speed_source_bits else "unspecified"
         data[func_class_attr] = fc_name
         data[alpha_attr] = alpha
@@ -1001,194 +1286,80 @@ def add_osm_default_freeflowspeed_and_capacity(
 
     return G
 
-###
-# BPR volume/capacity functions
-###
+def update_edge_speed_traveltime(
+        u,
+        v,
+        k,
+        data,
+        length_attr: str = "length",
+        freeflow_speed_attr: str = "ff_speed_kph", ##ff, obs, and forecast are INPUT
+        ff_speed_source_attr: str = "ff_speed_source",
+        obs_speed_attr: str = "obs_speed_kph",
+        obs_speed_source_attr: str = "obs_speed_source",
+        forecast_speed_attr: str = "forecast_speed_kph",
+        forecast_speed_source_attr: str = "forecast_speed_source",
+        peak_speed_attr: str = "peak_speed_kph", #peak speed and traversal time are OUTPUT
+        peak_speed_source_attr: str = "peak_speed_source",
+        travel_time_attr: str = "peak_traversal_time_sec",
+        traversal_time_source_attr: str = "peak_traversal_time_source",
+        params_path: str | Path = TRAFFIC_PARAMS_PATH,
+):
+    params = load_traffic_params(params_path)
 
-def bpr_time_from_volume(
-    ff_time_s: float,
-    volume_vph: float,
-    capacity_vph: float,
-    alpha: float = 0.15,
-    beta: float = 4.0,
-    max_factor: float = 10.0,
-) -> float:
-    """
-    BPR-like forward function: (ff_time, volume, capacity) -> congested_time.
-    """
-    if ff_time_s is None or ff_time_s <= 0:
-        return ff_time_s
-    if capacity_vph is None or capacity_vph <= 0 or volume_vph is None:
-        return ff_time_s
+    # Link penalties (robust defaults)
+    link_penalties = params.get("link_penalties") or {}
+    link_penalty_sec = float(link_penalties.get("link_traversal_time_penalty_sec", 0.0) or 0.0)
+    link_penalty_max_len_m = float(link_penalties.get("link_traversal_time_penalty_max_length_m", 0.0) or 0.0)
 
-    x = volume_vph / capacity_vph
-    tt = ff_time_s * (1.0 + alpha * (x ** beta))
-    # cap to avoid numeric blow-ups
-    return min(tt, ff_time_s * max_factor)
+    length_m = data.get(length_attr)
 
-def bpr_volume_from_time(
-    cong_time_s: float,
-    ff_time_s: float,
-    capacity_vph: float,
-    alpha: float = 0.15,
-    beta: float = 4.0,
-    max_x: float = 5.0,
-) -> float:
-    """
-    Inverse BPR: (congested_time, free_flow_time, capacity) -> implied volume.
+    # Speeds in priority order
+    speed_kmh = None
+    source = None
+    if forecast_speed_attr in data:
+        speed_kmh = data[forecast_speed_attr]
+        source = f"forecast ({data[forecast_speed_source_attr]})"
+    elif obs_speed_attr in data:
+        speed_kmh = data.get(obs_speed_attr)
+        source = f"observed ({data.get(obs_speed_source_attr)})"
+    elif freeflow_speed_attr in data:
+        speed_kmh = data.get(freeflow_speed_attr)
+        source = f"freeflow ({data.get(ff_speed_source_attr)}"
 
-    Returns volume_vph. If cong_time <= ff_time, returns 0.
-    """
-    if (cong_time_s is None or cong_time_s <= 0 or
-        ff_time_s is None or ff_time_s <= 0 or
-        capacity_vph is None or capacity_vph <= 0):
-        return 0.0
+    data[peak_speed_attr] = speed_kmh
+    data[peak_speed_source_attr] = source
 
-    ratio = cong_time_s / ff_time_s
+    if not isinstance(speed_kmh, (int, float)) or speed_kmh <= 0:
+        logger.error(f"No valid speed found for edge ({u}, {v}, {k})")
+        raise ValueError
 
-    if ratio <= 1.0:
-        # no congestion (or measurement noise): treat as v ~ 0
-        return 0.0
+    speed_ms = speed_kmh * (1000.0 / 3600.0)
+    time_sec = length_m / speed_ms
 
-    base = (ratio - 1.0) / alpha
-    if base <= 0:
-        return 0.0
+    # Penalize short *_link edges
+    if link_penalty_sec > 0 and link_penalty_max_len_m > 0:
+        hwy = _normalize_highway(data.get("highway"))
+        is_link = isinstance(hwy, str) and hwy.endswith("_link")
+        if is_link and length_m <= link_penalty_max_len_m:
+            time_sec += link_penalty_sec
+            data[
+                'link_penalty'] = link_penalty_sec  # TODO this should all be moved into a standard function so I don't forget it in the future
+            source = f"{source}+link_penalty"
 
-    x = base ** (1.0 / beta)  # v/c
-    x = min(x, max_x)         # avoid insane v/c
+    data[travel_time_attr] = float(time_sec)
+    data[traversal_time_source_attr] = source
 
-    return x * capacity_vph
-
-def time_from_speed(length_m: float, speed_kph: float) -> float:
-    """
-    Convert speed [km/h] to time [s] for a given length [m].
-    """
-    if length_m is None or length_m <= 0 or speed_kph is None or speed_kph <= 0:
-        return None
-    v_ms = speed_kph * 1000.0 / 3600.0
-    return length_m / v_ms
-
-
-def speed_from_time(length_m: float, time_s: float) -> float:
-    """
-    Convert time [s] to speed [km/h] for a given length [m].
-    """
-    if length_m is None or length_m <= 0 or time_s is None or time_s <= 0:
-        return None
-    v_ms = length_m / time_s
-    return v_ms * 3.6
-
-
-def volume_from_speeds_bpr(
-    length_m: float,
-    ff_speed_kph: float,
-    obs_speed_kph: float,
-    capacity_vph: float,
-    alpha: float = 0.15,
-    beta: float = 4.0,
-    uncongested_tol: float = 0.05,  # 5% tolerance
-    max_vc_ratio: float = 5.0,      # clamp v/c
-) -> float:
-    """
-    Infer volume from observed speed using inverse BPR with:
-      - uncongested clamp: t_obs <= (1+tol)*t0 -> v = 0
-      - max v/c clamp: v/c <= max_vc_ratio
-    """
-    if (
-        length_m is None or length_m <= 0 or
-        ff_speed_kph is None or ff_speed_kph <= 0 or
-        obs_speed_kph is None or obs_speed_kph <= 0 or
-        capacity_vph is None or capacity_vph <= 0
-    ):
-        return 0.0
-
-    ff_time_s = time_from_speed(length_m, ff_speed_kph)
-    cong_time_s = time_from_speed(length_m, obs_speed_kph)
-    if ff_time_s is None or cong_time_s is None:
-        return 0.0
-
-    # Clamp 1: effectively uncongested (or measurement noise)
-    if cong_time_s <= ff_time_s * (1.0 + uncongested_tol):
-        return 0.0
-
-    # Inverse BPR
-    ratio = cong_time_s / ff_time_s
-    base = (ratio - 1.0) / alpha
-    if base <= 0:
-        return 0.0
-
-    x = base ** (1.0 / beta)  # v/c
-
-    # Clamp 2: cap v/c
-    x = min(x, max_vc_ratio)
-
-    return x * capacity_vph
-
-def speed_from_volume_bpr(
-    length_m: float,
-    ff_speed_kph: float,
-    volume_vph: float,
-    capacity_vph: float,
-    alpha: float = 0.15,
-    beta: float = 4.0,
-    max_factor: float = 10.0,
-) -> float:
-    ff_time_s = time_from_speed(length_m, ff_speed_kph)
-    cong_time_s = bpr_time_from_volume(
-        ff_time_s, volume_vph, capacity_vph,
-        alpha=alpha, beta=beta, max_factor=max_factor
-    )
-    return speed_from_time(length_m, cong_time_s)
-
-
-def estimate_volumes_from_obs_speeds(
-    G: nx.MultiDiGraph,
-    length_attr: str = "length",
-    ff_speed_attr: str = "ff_speed_kph",
-    obs_speed_attr: str = "obs_speed_kph",
-    capacity_attr: str = "capacity_vph",
-    out_volume_attr: str = "volume_vph",
-    alpha: float = 0.15,
-    beta: float = 4.0,
-    uncongested_tol: float = 0.05,
-    max_vc_ratio: float = 3.0,
-) -> None:
-    """
-    For each edge, infer volume from observed congested speed using
-    inverse BPR, with:
-      - uncongested clamp (t_obs <= (1+tol)*t0 -> v=0)
-      - max v/c clamp (v/c <= max_vc_ratio).
-
-    Modifies G in-place, writing volumes to out_volume_attr.
-    """
-    for u, v, k, data in G.edges(keys=True, data=True):
-        length_m = data.get(length_attr)
-        ff_speed_kph = data.get(ff_speed_attr)
-        obs_speed_kph = data.get(obs_speed_attr)
-        cap = data.get(capacity_attr)
-
-        vol = volume_from_speeds_bpr(
-            length_m=length_m,
-            ff_speed_kph=ff_speed_kph,
-            obs_speed_kph=obs_speed_kph,
-            capacity_vph=cap,
-            alpha=alpha,
-            beta=beta,
-            uncongested_tol=uncongested_tol,
-            max_vc_ratio=max_vc_ratio,
-        )
-
-        data[out_volume_attr] = vol
-
-
-def calculate_traversal_time_from_available_speeds(
+def update_graph_speed_traveltime(
     G: nx.MultiDiGraph,
     length_attr: str = "length",
     freeflow_speed_attr: str = "ff_speed_kph",
+    ff_speed_source_attr: str = "ff_speed_source",
     obs_speed_attr: str = "obs_speed_kph",
-    scenario_speed_attr: str = "scenario_speed_kph",
-    travel_time_attr: str = "traversal_time_sec",
-    traversal_time_source_attr: str = "traversal_time_source",
+    obs_speed_source_attr: str = "obs_speed_source",
+    peak_speed_attr: str = "peak_speed_kph",
+    peak_speed_source_attr: str = "peak_speed_source",
+    travel_time_attr: str = "peak_traversal_time_sec",
+    traversal_time_source_attr: str = "peak_traversal_time_source",
     params_path: str | Path = TRAFFIC_PARAMS_PATH,
 ) -> None:
     """
@@ -1199,57 +1370,14 @@ def calculate_traversal_time_from_available_speeds(
     """
     logger.info("Calculating traversal times from available speeds")
 
-    params = load_traffic_params(params_path)
-
-    # Link penalties (robust defaults)
-    link_penalties = params.get("link_penalties") or {}
-    link_penalty_sec = float(link_penalties.get("link_traversal_time_penalty_sec", 0.0) or 0.0)
-    link_penalty_max_len_m = float(link_penalties.get("link_traversal_time_penalty_max_length_m", 0.0) or 0.0)
-
     for u, v, k, data in G.edges(keys=True, data=True):
-        length_m = data.get(length_attr)
-        if not isinstance(length_m, (int, float)) or length_m <= 0:
-            logger.warning(f"Invalid length for edge ({u}, {v}, {k})")
-            continue
-
-        # Speeds in priority order
-        speed_kmh = None
-        source = None
-        if scenario_speed_attr in data:
-            speed_kmh = data.get(scenario_speed_attr)
-            source = "scenario"
-        elif obs_speed_attr in data:
-            speed_kmh = data.get(obs_speed_attr)
-            source = "observed"
-        elif freeflow_speed_attr in data:
-            speed_kmh = data.get(freeflow_speed_attr)
-            source = "freeflow"
-
-        if not isinstance(speed_kmh, (int, float)) or speed_kmh <= 0:
-            logger.warning(f"No valid speed found for edge ({u}, {v}, {k})")
-            continue
-
-        speed_ms = speed_kmh * (1000.0 / 3600.0)
-        time_sec = length_m / speed_ms
-
-        # Penalize short *_link edges
-        if link_penalty_sec > 0 and link_penalty_max_len_m > 0:
-            hwy = _normalize_highway(data.get("highway"))
-            is_link = isinstance(hwy, str) and hwy.endswith("_link")
-            if is_link and length_m <= link_penalty_max_len_m:
-                time_sec += link_penalty_sec
-                source = f"{source}+link_penalty"
-
-        data[travel_time_attr] = float(time_sec)
-        data[traversal_time_source_attr] = source
+        update_edge_speed_traveltime(u,v,k,data)
 
     logger.info("Finished calculating traversal times")
-
 
 ###
 # Initialization - build routable graph function, including init estimation of volume and capacity
 ###
-
 
 def build_routable_graph_from_edges(
     G: nx.MultiDiGraph,
@@ -1257,23 +1385,25 @@ def build_routable_graph_from_edges(
     speed_col: str = "harmSpeed_t2_d1",
     length_col: str = "length_geom",
     ff_speed_attr: str = "ff_speed_kph",
+    ff_speed_source_attr: str = "ff_speed_source",
     obs_speed_attr: str = "obs_speed_kph",
-    travel_time_attr: str = "traversal_time_sec",
-    obs_speed_source_attr: str = "speed_source",
-    tomtom_sample_attr: str = "tomtom_sample_size",   # NEW
+    obs_speed_source_attr: str = "obs_speed_source",
+    tomtom_sample_attr: str = "tomtom_sample_size",
+    tomtom_night_speed_attr: str = "tomtom_night_speed_kph",
+    tomtom_sample_night_attr: str = "tomtom_sample_size_night",
+    night_sample_min: int = 3,
 ) -> nx.MultiDiGraph:
     """
     Create a routable graph and attach TomTom speeds + sample size to edges.
     """
-    G_modified = G.copy()
-    G_modified = add_osm_default_freeflowspeed_and_capacity(G_modified)
+    G = add_osm_default_freeflowspeed_and_capacity(G)
 
     for _, row in edges_with_speeds.iterrows():
         u, v, k = row["u"], row["v"], row["key"]
-        if not G_modified.has_edge(u, v, k):
+        if not G.has_edge(u, v, k):
             continue
 
-        edge_data = G_modified[u][v][k]
+        edge_data = G[u][v][k]
 
         speed_kmh = row.get(speed_col)
         if isinstance(speed_kmh, (int, float)) and speed_kmh > 0:
@@ -1281,27 +1411,50 @@ def build_routable_graph_from_edges(
             edge_data[obs_speed_source_attr] = "tomtom"
 
         # attach sample size (even if speed missing)
-        ss = row.get("tomtom_sample_size")
+        ss = row.get(tomtom_sample_attr)
         if isinstance(ss, (int, float)) and np.isfinite(ss):
             edge_data[tomtom_sample_attr] = float(ss)
 
-    calculate_traversal_time_from_available_speeds(G_modified)
-    return G_modified
+        # attach night speeds + sample size (if present)
+        night_speed = row.get(tomtom_night_speed_attr)
+        night_ss = row.get(tomtom_sample_night_attr)
+
+        if isinstance(night_speed, (int, float)) and np.isfinite(night_speed) and night_speed > 0:
+            edge_data[tomtom_night_speed_attr] = float(night_speed)
+
+        if isinstance(night_ss, (int, float)) and np.isfinite(night_ss):
+            edge_data[tomtom_sample_night_attr] = float(night_ss)
+
+        # If night sample size clears the threshold, use as free-flow speed
+        if (
+            isinstance(night_speed, (int, float))
+            and np.isfinite(night_speed)
+            and night_speed > 0
+            and isinstance(night_ss, (int, float))
+            and np.isfinite(night_ss)
+            and night_ss >= night_sample_min
+        ):
+            edge_data[ff_speed_attr] = float(night_speed)
+            edge_data[ff_speed_source_attr] = "tomtom_night"
+
+
+    update_graph_speed_traveltime(G)
+    return G
 
 
 # ---------------------------------------------------------------------------
 # High-level API
 # ---------------------------------------------------------------------------
 def conflate_tomtom_to_osm(
-        osm_filepath: str,
+        scenario_dir: str,
         tomtom_stats_json_path: str,
         tomtom_geojson_path: str,
-        speed_col: str = "obs_speed_kph",
+        tomtom_night_stats_path: Optional[str] = None,
+        tomtom_night_geom_path: Optional[str] = None,
+        speed_col: str = "harmSpeed_t2_d1",
         cfg: Optional[MatchConfig] = None,
         debug_gpkg_prefix: Optional[str] = None,
-        save_graphml_to: Optional[str] = None,
-        save_nodes_to: Optional[str] = None,
-        save_edges_to: Optional[str] = None,
+        night_sample_min: int = 10,
 ) -> Tuple[gpd.GeoDataFrame, Dict[str, Any], Dict[str, Any], pd.DataFrame]:
     """
     High-level function:
@@ -1347,6 +1500,12 @@ def conflate_tomtom_to_osm(
     matches_df : DataFrame
         Segment-to-edge matches.
     """
+    osm_filepath = Path(scenario_dir) / "input_data/osm_study_area_editable.osm"
+    new_osm_filepath = Path(scenario_dir) / "input_data/traffic/filtered_osm.osm"
+    save_graphml_to = Path(scenario_dir) / "input_data/traffic/routing_graph.graphml"
+    save_nodes_to = Path(scenario_dir) / "input_data/traffic/routing_nodes.gpkg"
+    save_edges_to = Path(scenario_dir) / "input_data/traffic/routing_edges.gpkg"
+
     logger.info(
         "Starting TomTom–OSM conflation: osm='%s', stats_json='%s', geojson='%s'",
         osm_filepath,
@@ -1365,7 +1524,7 @@ def conflate_tomtom_to_osm(
         )
 
     # 0. Load drivable OSM graph from file
-    G_drive = get_osm_graph(osm_filepath)
+    G_drive = get_osm_graph(osm_filepath, new_osm_filepath)
 
     # 1. TomTom
     logger.info("Loading TomTom segments and metadata")
@@ -1436,12 +1595,70 @@ def conflate_tomtom_to_osm(
         "Aggregation complete: %d edges with TomTom speed attributes",
         len(edges_with_speeds),
     )
+    # 4b. Optional: Nighttime speeds (for free-flow speed inference)
+    if tomtom_night_stats_path and tomtom_night_geom_path:
+        logger.info(
+            "Loading nighttime TomTom exports: stats_json='%s', geojson='%s'",
+            tomtom_night_stats_path,
+            tomtom_night_geom_path,
+        )
+
+        tt_night_gdf, night_date_ranges, night_time_sets = load_tomtom_segments(
+            tomtom_night_stats_path,
+            tomtom_night_geom_path,
+            target_crs=cfg.target_crs,
+        )
+
+        logger.info(
+            "Loaded %d nighttime TomTom segments; night_date_ranges=%d, night_time_sets=%d",
+            len(tt_night_gdf),
+            len(night_date_ranges),
+            len(night_time_sets),
+        )
+
+        logger.info("Matching nighttime TomTom segments to OSM edges")
+        matches_night_df = match_tomtom_to_osm(tt_night_gdf, osm_edges, cfg)
+
+        logger.info(
+            "Completed nighttime matching: %d matches, %d unique OSM edges with at least one night match",
+            len(matches_night_df),
+            matches_night_df["edge_id"].nunique() if "edge_id" in matches_night_df.columns else -1,
+        )
+
+        logger.info("Aggregating nighttime TomTom speeds to OSM edges")
+        edges_with_night = aggregate_speeds_to_edges(
+            tt_night_gdf,
+            matches_night_df,
+            osm_edges,
+            sample_size_out_attr="tomtom_sample_size_night",
+        )
+
+        harm_cols = [c for c in edges_with_night.columns if c.startswith("harmSpeed_")]
+        if len(harm_cols) != 1:
+            raise ValueError(
+                f"Expected exactly 1 nighttime harmonic speed column (harmSpeed_*), found {len(harm_cols)}: {harm_cols}"
+            )
+        night_harm_col = harm_cols[0]
+
+        night_keep = edges_with_night[["edge_id", night_harm_col, "tomtom_sample_size_night"]].copy()
+        night_keep = night_keep.rename(columns={night_harm_col: "tomtom_night_speed_kph"})
+
+        # Merge night attributes onto day-aggregated edges
+        edges_with_speeds = edges_with_speeds.merge(night_keep, on="edge_id", how="left")
+
+        logger.info(
+            "Nighttime merge complete: %d edges with night attributes (tomtom_night_speed_kph, tomtom_sample_size_night)",
+            night_keep["tomtom_night_speed_kph"].notna().sum(),
+        )
+
 
     # 5. Build routable graph and optionally save
     logger.info("Building routable graph from drivable OSM network and TomTom speeds")
     G_routable = build_routable_graph_from_edges(
         G_drive,
         edges_with_speeds,
+        speed_col=speed_col,
+        night_sample_min=night_sample_min,
     )
 
     nodes, edges = ox.graph_to_gdfs(G_routable)
@@ -1461,4 +1678,4 @@ def conflate_tomtom_to_osm(
     logger.debug(
         "TomTom–OSM conflation finished. Returning edges_with_speeds, date_ranges, time_sets, matches_df"
     )
-    return edges_with_speeds, date_ranges, time_sets, matches_df
+    return G_routable, edges_with_speeds, date_ranges, time_sets, matches_df

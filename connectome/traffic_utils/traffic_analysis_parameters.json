@@ -10,34 +10,64 @@
   },
 
   "functional_classes": {
-    "motorway": {
+    "freeway": {
       "description": "Fully access-controlled freeways and motorways.",
       "alpha": 0.15,
-      "beta": 4.0,
+      "beta": 6.0,
+      "default_capacity_perlane": 1900,
+      "min_capacity_perlane": 1600,
+      "max_capacity_perlane": 2200,
+      "always_treat_as_signalized": 0,
+      "signal_capacity_factor": 0.6,
+      "must_be_grade_separated": 1,
       "osm_highway_tags": ["motorway", "motorway_link"]
     },
-    "trunk": {
-      "description": "High-capacity regional roads not fully access-controlled.",
-      "alpha": 0.15,
-      "beta": 3.5,
-      "osm_highway_tags": ["trunk", "trunk_link"]
+    "multilane_arterial": {
+      "description": "High-capacity regional roads with at-grade signals",
+      "alpha": 0.3,
+      "beta": 5,
+      "capacity_perlane": 1600,
+      "min_capacity_perlane": 1300,
+      "max_capacity_perlane": 1900,
+      "always_treat_as_signalized": 0,
+      "signal_capacity_factor": 0.6,
+      "must_be_grade_separated": 0,
+      "osm_highway_tags": ["trunk", "trunk_link","primary", "primary_link"]
     },
-    "arterial": {
-      "description": "Principal urban/suburban arterials.",
-      "alpha": 0.15,
-      "beta": 3.0,
-      "osm_highway_tags": ["primary", "primary_link"]
+    "smaller_arterial": {
+      "description": "Lower-capacity urban/suburban arterials.",
+      "alpha": 0.6,
+      "beta": 3,
+      "capacity_perlane": 1400,
+      "min_capacity_perlane": 1200,
+      "max_capacity_perlane": 1600,
+      "always_treat_as_signalized": 0,
+      "signal_capacity_factor": 0.55,
+      "must_be_grade_separated": 0,
+      "osm_highway_tags": ["trunk", "trunk_link", "primary", "primary_link"]
     },
     "collector": {
       "description": "Secondary arterials and collectors.",
-      "alpha": 0.10,
+      "alpha": 0.8,
       "beta": 2.5,
+      "capacity_perlane": 1200,
+      "min_capacity_perlane": 1000,
+      "max_capacity_perlane": 1400,
+      "always_treat_as_signalized": 1,
+      "signal_capacity_factor": 0.5,
+      "must_be_grade_separated": 0,
       "osm_highway_tags": ["secondary", "secondary_link", "tertiary"]
     },
     "local": {
       "description": "Local streets, access roads, and minor roads.",
-      "alpha": 0.05,
+      "alpha": 0.9,
       "beta": 2.0,
+      "capacity_perlane": 900,
+      "min_capacity_perlane": 700,
+      "max_capacity_perlane": 1100,
+      "always_treat_as_signalized": 1,
+      "signal_capacity_factor": 0.5,
+      "must_be_grade_separated": 0,
       "osm_highway_tags": [
         "residential",
         "unclassified",
@@ -65,8 +95,17 @@
   },
 
   "toll_cost_per_km": {
-    "description": "Dollars per km, taken as a rough average of current charges on I25 and I70",
-    "cost_per_km": 0.62
+    "description": "Dollars per km at peak hour. Default taken as a rough average of current charges on I25 and I70",
+    "default": 0.62,
+    "I270_CDOT": 0.62,
+    "I270_HCNWA": 0.41,
+    "I 70 EXPR": 0.35,
+    "I 25 EXPR": 0.96
+  },
+
+  "custom_capacities": {
+    "description": "hard-wired capacities for specific roadways by OSM reference (not per lane, total)" ,
+    "I 270": 3000
   },
 
   "value_of_travel_time": {
@@ -81,13 +120,6 @@
   },
 
   "signal_capacity_factor_default": 0.6,
-  "signal_capacity_functional_classes": {
-    "motorway":  { "signal_capacity_factor": 0.6 },
-    "trunk":     { "signal_capacity_factor": 0.6 },
-    "arterial":  { "signal_capacity_factor": 0.55 },
-    "collector": { "signal_capacity_factor": 0.5 },
-    "local":     { "signal_capacity_factor": 0.5 }
-  },
 
   "default_dir_lanes_by_highway": {
     "motorway": 3,
@@ -107,24 +139,6 @@
     "track": 1
   },
 
-  "capacity_per_lane_by_highway": {
-  "default": 1200,
-  "motorway": 2200,
-  "motorway_link": 1800,
-  "trunk": 2000,
-  "trunk_link": 1800,
-  "primary": 1900,
-  "primary_link": 1800,
-  "secondary": 1800,
-  "secondary_link": 1700,
-  "tertiary": 1700,
-  "tertiary_link": 1600,
-  "unclassified": 1200,
-  "residential": 900,
-  "living_street": 400,
-  "service": 600,
-  "track": 400
-  },
 
   "osm_highway_to_tmas_fsystem_rank": {
   "motorway":        [1, 2, 3],
@@ -137,6 +151,11 @@
   "living_street":   [7],
   "service":         [7, 6, 5],
   "road":            [4, 3, 5, 2, 6, 7]
+  },
+
+  "parking_cost": {
+    "description": "Cost in USD for 8 hours parking, 9-5, on a weekday. Key is the minimum lodes_jobs_per_sqkm. From Parkopedia.",
+    "40000": 10
   }
 
 }

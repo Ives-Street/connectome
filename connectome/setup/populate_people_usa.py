@@ -180,6 +180,7 @@ def create_userclasses(tracts: gpd.GeoDataFrame,
 def create_userclass_statistics(
     tracts: gpd.GeoDataFrame,
     user_classes: pd.DataFrame,
+    min_pop_per_geom = 50, #TODO move to parameters file
     save_to: str = ""
 ) -> pd.DataFrame:
     """Calculate statistics for each user class.
@@ -215,7 +216,7 @@ def create_userclass_statistics(
         geom_id = tracts.loc[tract_idx, 'geom_id']
 
         tract_pop = tracts.loc[tract_idx, 'B01003_001E']
-        if tract_pop <= 0:
+        if tract_pop <= min_pop_per_geom:
             continue
 
         pop_hisp_lat = tracts.loc[tract_idx, 'B03001_003E']

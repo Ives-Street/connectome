@@ -6,6 +6,7 @@ import numpy as np
 from tqdm import tqdm
 
 import communication
+from traffic_utils.assignment import assign_relative_demand
 
 
 MODES = [ #todo - make this universal for the whole codebase
@@ -365,6 +366,7 @@ def get_geometry_results_with_viz(
 def evaluate_scenario(scenario_dir,
                       user_classes,
                       geometry_and_dests,
+                      add_relative_for_induced_demand = True,
                       ):
     os.makedirs(f"{scenario_dir}/results", exist_ok=True)
 
@@ -404,6 +406,8 @@ def evaluate_scenario(scenario_dir,
                                  geometry_and_dests,
                                  population_by_geom_and_userclass)
 
+
+
     # we've done all the calculations! Now sum by userclass and geometry:
     results_by_userclass = get_userclass_results(scenario_dir,
                                                   userclass_gtms,
@@ -416,6 +420,13 @@ def evaluate_scenario(scenario_dir,
                                                  value_sum_total_by_OD_by_userclass,
                                                  population_by_geom_and_userclass,
                                                  mode_selections_by_userclass)
+
+    #if we're going to add in induced demand, do it here:
+    if bool(add_relative_for_induced_demand):
+        #convert from yearly to peak hour first
+
+        assign_relative_demand(scenario_dir)
+
 
     print("results by geometry sum", results_by_geometry.total_value.sum(), "results by userclass sum", results_by_userclass.total_value.sum())
 

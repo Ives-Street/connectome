@@ -14,6 +14,7 @@ DateLike = Union[str, date, datetime]
 EdgeKey = Tuple[int, int, int]
 
 import statsmodels.api as sm
+import numpy as np
 import geopandas as gpd
 import networkx as nx
 import pandas as pd
@@ -25,7 +26,7 @@ try:
 except ImportError:  # pragma: no cover
     ox = None
 
-LOG = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 # ==============================================================================
 # Traffic analysis parameter loading (JSON)
@@ -54,7 +55,7 @@ def _load_traffic_params(
         return _TRAFFIC_PARAMS_CACHE
 
     if not os.path.exists(json_path):
-        LOG.warning(
+        logger.warning(
             "traffic analysis parameters JSON not found at %s; "
             "proceeding without functional-class rank mapping.",
             json_path,
@@ -146,7 +147,7 @@ def _ensure_graph(G: nx.MultiDiGraph | str) -> nx.MultiDiGraph:
                 "osmnx is required to load a graph from a file path, "
                 "but it is not installed."
             )
-        LOG.info("Loading graph from %s via osmnx.load_graphml", G)
+        logger.info("Loading graph from %s via osmnx.load_graphml", G)
         return ox.load_graphml(G)
 
     raise TypeError(
@@ -524,7 +525,7 @@ def match_tmas_stations_to_graph(
 
     # Project to local CRS for distance computations.
     proj_crs = stations_wgs.estimate_utm_crs()
-    LOG.info("Using projected CRS %s for distance calculations.", proj_crs)
+    logger.info("Using projected CRS %s for distance calculations.", proj_crs)
 
     stations = stations_wgs.to_crs(proj_crs)
     edges = edges_wgs.to_crs(proj_crs)
@@ -546,7 +547,7 @@ def match_tmas_stations_to_graph(
         candidate_idx = list(edges_sindex.intersection(bbox))
 
         if not candidate_idx:
-            LOG.warning(
+            logger.warning(
                 "No edge bbox candidates for TMAS station_id=%s travel_dir=%s",
                 s_row_wgs.get("station_id"),
                 s_row_wgs.get("travel_dir"),
@@ -577,7 +578,7 @@ def match_tmas_stations_to_graph(
                 candidates_dist.append((e_idx, d_m))
 
         if not candidates_dist:
-            LOG.warning(
+            logger.warning(
                 "All candidate edges beyond distance cap for station_id=%s travel_dir=%s",
                 s_row_wgs.get("station_id"),
                 s_row_wgs.get("travel_dir"),
@@ -657,7 +658,7 @@ def match_tmas_stations_to_graph(
         top_candidates = candidates_scored[:max_candidates]
 
         if not top_candidates:
-            LOG.warning(
+            logger.warning(
                 "No scored candidates for TMAS station_id=%s travel_dir=%s",
                 s_row_wgs.get("station_id"),
                 s_row_wgs.get("travel_dir"),
@@ -698,7 +699,7 @@ def match_tmas_stations_to_graph(
     matches_gdf = gpd.GeoDataFrame(out_records, geometry="geometry", crs="EPSG:4326")
 
     if save_matches_gpkg_to is not None:
-        LOG.info("Writing TMAS match debug GeoPackage to %s", save_matches_gpkg_to)
+        logger.info("Writing TMAS match debug GeoPackage to %s", save_matches_gpkg_to)
         matches_gdf.to_file(
             save_matches_gpkg_to,
             layer="tmas_station_matches",
@@ -713,7 +714,7 @@ def match_tmas_stations_to_graph(
                 driver="GPKG",
             )
 
-    return matches_gdf
+    return G, matches_gdf
 
 
 # ==============================================================================
@@ -780,8 +781,9 @@ def apply_tmas_obs_volumes_to_graph(
 
     if G is None:
         G_path = f"{scenario_dir}/input_data/traffic/post_benchmark/graph_with_relative_demands.graphml"
-        G = ox.load_graphml(G_path)
-    tmas_station_matches_path = f"{scenario_dir}/input_data/traffic/pre_benchmark/tmas_station_matches.gpkg"
+    if type(G) == str:
+        G = ox.load_graphml(G)
+    tmas_station_matches_path = f"{scenario_dir}/input_data/traffic/tmas_station_matches.gpkg"
     tmas_vol_path = f"{scenario_dir}/input_data/tmas/tmas.VOL"
 
     # --- Load station matches (GPKG) ---
@@ -915,66 +917,349 @@ def apply_tmas_obs_volumes_to_graph(
             raise KeyError(f"Edge data missing for (u,v,key)=({u},{v},{k}).")
 
         if attr_name in data:
-            raise ValueError(
+            logger.warning(
                 f"Edge (u,v,key)=({u},{v},{k}) already has attribute '{attr_name}'. "
-                "Per policy, refusing to overwrite."
+                "Assuming this means the function has already been run, and skipping..."
             )
+            break
 
         data[attr_name] = val
         matched_edges.append((u, v, k))
 
     nodes, edges = ox.graph_to_gdfs(G, nodes=True, edges=True)
     edges.crs=4326
-    edges.to_file(f"{scenario_dir}/input_data/traffic/post_benchmark/edges_with_demands_and_TMAS_vols.gpkg",driver="GPKG")
-    ox.save_graphml(G, f"{scenario_dir}/input_data/traffic/post_benchmark/graph_with_demands_and_TMAS_vols.graphml")
+    edges.to_file(f"{scenario_dir}/input_data/traffic/routing_edges.gpkg",driver="GPKG")
+    ox.save_graphml(G, f"{scenario_dir}/input_data/traffic/routing_graph.graphml")
 
     return G, edges
 
-def demand_to_volume_ratio(scenario_dir, G, matched_edges):
-    matched_edges['obs_vol_vph'] = pd.to_numeric(matched_edges['obs_vol_vph'])
-    matched_edges['relative_demand'] = pd.to_numeric(matched_edges['relative_demand'])
-    matches = matched_edges[matched_edges.obs_vol_vph.notnull()]
-    X = matches.relative_demand
-    y = matches.obs_vol_vph
+def proxy_to_volume_ratio(scenario_dir,
+                           matched_edges,
+                           input_variable,
+                           input_varaiable_name,
+                           ):
+    assert 'obs_vol_vph' in matched_edges.columns, 'obs_vol_vph column is missing'
+
+    # Ensure numeric, coercing bad values to NaN
+    matched_edges = matched_edges.copy()
+    matched_edges['obs_vol_vph'] = pd.to_numeric(
+        matched_edges['obs_vol_vph'], errors='coerce'
+    )
+    matched_edges[input_variable] = pd.to_numeric(
+        matched_edges[input_variable], errors='coerce'
+    )
+
+    # Keep rows where BOTH obs_vol_vph and proxy variable are finite
+    valid_mask = (
+        matched_edges['obs_vol_vph'].notna()
+        & matched_edges[input_variable].notna()
+        & np.isfinite(matched_edges['obs_vol_vph'])
+        & np.isfinite(matched_edges[input_variable])
+    )
+    matches = matched_edges[valid_mask]
+
+    if matches.empty or len(matches) < 2:
+        raise ValueError(
+            f"Not enough valid data points to fit proxy-to-volume ratio. "
+            f"Found {len(matches)} valid rows after filtering for finite "
+            f"'obs_vol_vph' and '{input_variable}'."
+        )
+
+    X = matches[input_variable]
+    y = matches['obs_vol_vph']
+
+    # Fit OLS without intercept (pure proportionality y = coef * X)
     model = sm.OLS(y, X).fit()
 
     # Create scatter plot
     plt.figure(figsize=(10, 6))
     plt.scatter(X, y, alpha=0.5)
-    plt.plot(X, X * model.params['relative_demand'], color='red',
-             label=f'Fitted line (slope={model.params["relative_demand"]:.2f})')
-    plt.xlabel('Relative Demand')
+
+    slope = model.params[input_variable]
+    plt.plot(X, X * slope, color='red',
+             label=f'Fitted line (slope={slope:.2f})')
+    plt.xlabel(input_varaiable_name)
     plt.ylabel('Observed Volume (vph)')
-    plt.title('Relative Demand vs Observed Volume')
+    plt.title(f'{input_varaiable_name} vs Observed Volume')
     plt.legend()
     plt.grid(True)
 
     # Save plot
-    plt.savefig(f"{scenario_dir}/input_data/traffic/post_benchmark/demand_volume_scatter.png")
+    os.makedirs(f"{scenario_dir}/input_data/traffic/debug", exist_ok=True)
+    plt.savefig(f"{scenario_dir}/input_data/traffic/debug/proxy_volume_scatter.png")
     plt.close()
 
-    coef = model.params['relative_demand']
-    return coef
+    stats = {
+        "coef": float(slope),
+        "r2": float(model.rsquared),
+        "adj_r2": float(model.rsquared_adj),
+        "n_obs": int(model.nobs),
+        "std_err": float(model.bse[input_variable]),
+        "t_stat": float(model.tvalues[input_variable]),
+        "p_value": float(model.pvalues[input_variable]),
+        "rmse": float(np.sqrt(model.mse_resid)),
+    }
+    stats_out_json_path = f"{scenario_dir}/input_data/traffic/debug/proxy_volume_stats.json"
+    json.dump(stats, open(stats_out_json_path, "w"), indent=2)
 
-def infer_volumes_from_relative_demand(scenario_dir, G, matched_edges):
+    return slope
+
+def infer_volume(scenario_dir,
+                 G=None,
+                 matched_edges=None,
+                 input_variable = "tomtom_sample_size",
+                 input_varaiable_name = "Tomtom Sample Size",
+                 save_G = False,
+                 save_edges = False,
+                 ):
     if G is None:
-        G_path = f"{scenario_dir}/input_data/traffic/post_benchmark/graph_with_demands_and_TMAS_vols.graphml"
-        G = ox.load_graphml(G_path)
+        G = ox.load_graphml(f"{scenario_dir}/input_data/traffic/routing_graph.graphml")
     if matched_edges is None:
-        matched_edges_path = f"{scenario_dir}/input_data/traffic/post_benchmark/edges_with_demands_and_TMAS_vols.gpkg"
-        matched_edges = gpd.read_file(matched_edges_path)
-    coef_out_json_path = f"{scenario_dir}/input_data/traffic/post_benchmark/coef_out.json"
+        matched_edges = f"{scenario_dir}/input_data/traffic/routing_edges.gpkg"
 
-    coef = demand_to_volume_ratio(scenario_dir, G, matched_edges)
-    json.dump({"demand_to_volume_coef": coef}, open(coef_out_json_path, "w"), indent=2)
+    coef = proxy_to_volume_ratio(scenario_dir, matched_edges, input_variable, input_varaiable_name)
 
     for u, v, k, data in G.edges(keys=True, data=True):
-        rd = data.get("relative_demand")
+        if 'modeled_vol_vph' in data.keys():
+            logger.info("modeled_vol already calculated, skipping...")
+            break
+        rd = data.get(input_variable)
         if rd is not None:
-            data["modeled_vol_vph"] = float(rd) * coef
+            modeled_volume = float(rd) * coef
+            data["modeled_vol_vph"] = modeled_volume
+        else: # defaults to 0 modeled vol when TomTom is too low.
+            data["modeled_vol_vph"] = 0
 
-    ox.save_graphml(G, f"{scenario_dir}/input_data/traffic/post_benchmark/graph_with_demands_and_modeled_vols.graphml")
+    if save_G:
+        ox.save_graphml(G, f"{scenario_dir}/input_data/traffic/routing_graph.graphml")
+    if save_edges:
+        nodes, edges = ox.graph_to_gdfs(G, nodes=True, edges=True)
+        edges.crs = 4326
+        edges.to_file(f"{scenario_dir}/input_data/traffic/routing_edges.gpkg", driver="GPKG")
+        return G, edges
+    return G, None
 
-    nodes, edges = ox.graph_to_gdfs(G, nodes=True, edges=True)
-    edges.crs = 4326
-    edges.to_file(f"{scenario_dir}/input_data/traffic/post_benchmark/edges_with_demands_and_modeled_vols.gpkg", driver="GPKG")
+def calibrate_capacities_by_functional_class(
+    scenario_dir,
+    G=None,
+    edges=None,
+    params_path="traffic_utils/traffic_analysis_parameters.json",
+    winsor_p=(0.05, 0.95),
+    round_to = 50,
+    save_G=False,
+    save_edges=False,
+):
+    with open(params_path, "r") as f:
+        params = json.load(f)
+    fc_params = params.get("functional_classes", {})
+
+    if G is None:
+        G = ox.load_graphml(f"{scenario_dir}/input_data/traffic/routing_graph.graphml")
+    if edges is None:
+        edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
+
+    # Work on a copy to avoid side effects on caller's DataFrame
+    edges = edges.copy()
+
+    # ------------------------------------------------------------------
+    # Ensure numeric types and filter out invalid rows
+    # ------------------------------------------------------------------
+    numeric_cols = [
+        "ff_speed_kph",
+        "obs_speed_kph",
+        "vdf_alpha",
+        "vdf_beta",
+        "modeled_vol_vph",
+        "lanes",
+    ]
+    for col in numeric_cols:
+        if col in edges.columns:
+            edges[col] = pd.to_numeric(edges[col], errors="coerce")
+        else:
+            # If a required column is completely missing, fail clearly
+            raise KeyError(f"Required column '{col}' is missing from edges GeoDataFrame")
+
+    # Valid rows: all needed cols present and strictly > 0 where required
+    valid_mask = (
+        edges["ff_speed_kph"].notna() & (edges["ff_speed_kph"] > 0) &
+        edges["obs_speed_kph"].notna() & (edges["obs_speed_kph"] > 0) &
+        edges["vdf_alpha"].notna() & (edges["vdf_alpha"] > 0) &
+        edges["vdf_beta"].notna() & (edges["vdf_beta"] > 0) &
+        edges["modeled_vol_vph"].notna() & (edges["modeled_vol_vph"] > 0) &
+        edges["lanes"].notna() & (edges["lanes"] > 0)
+    )
+
+    # Initialize as NaN so invalid rows remain NaN
+    edges["implied_capacity_vph"] = np.nan
+    edges["implied_cap_per_lane"] = np.nan
+
+    # ------------------------------------------------------------------
+    # Implied capacity from BPR-style speed formulation:
+    # u = u_ff / (1 + alpha * (v/c)^beta)
+    # ------------------------------------------------------------------
+    valid_edges = edges[valid_mask].copy()
+    if not valid_edges.empty:
+        r = valid_edges["ff_speed_kph"] / valid_edges["obs_speed_kph"] - 1.0
+        # Guard against non-positive r / alpha
+        vc_term = (r / valid_edges["vdf_alpha"])
+        # Any non-positive vc_term cannot be exponentiated meaningfully;
+        # mark them invalid
+        positive_mask = vc_term > 0
+        vc_term = vc_term[positive_mask] ** (1.0 / valid_edges.loc[positive_mask, "vdf_beta"])
+
+        implied_capacity = valid_edges.loc[positive_mask, "modeled_vol_vph"] / vc_term
+        implied_cap_per_lane = implied_capacity / valid_edges.loc[positive_mask, "lanes"]
+
+        edges.loc[valid_edges.index[positive_mask], "implied_capacity_vph"] = implied_capacity
+        edges.loc[valid_edges.index[positive_mask], "implied_cap_per_lane"] = implied_cap_per_lane
+
+    debug = {
+        "params_path": params_path,
+        "winsor_percentiles": winsor_p,
+        "functional_classes": {},
+    }
+    cap_per_lane_by_fc = {}
+
+    for fc, g in edges.groupby("functional_class"):
+        fc_key = str(fc)
+
+        # Drop NaNs in implied capacity so they don't contaminate stats
+        vals = g["implied_cap_per_lane"].to_numpy()
+        wts = g["modeled_vol_vph"].to_numpy()
+        mask = np.isfinite(vals) & np.isfinite(wts) & (wts > 0)
+
+        if not np.any(mask):
+            # No usable data for this FC; skip calibration
+            continue
+
+        vals = vals[mask]
+        wts = wts[mask]
+
+        lo_w, hi_w = np.quantile(vals, winsor_p)
+        vals_w = np.clip(vals, lo_w, hi_w)
+        k_fit = float(np.average(vals_w, weights=wts))
+
+        fc_cfg = fc_params.get(fc_key, {})
+        k_min = fc_cfg.get("min_capacity_perlane", None)
+        k_max = fc_cfg.get("max_capacity_perlane", None)
+        if k_min is not None:
+            k_fit = max(k_fit, float(k_min))
+        if k_max is not None:
+            k_fit = min(k_fit, float(k_max))
+
+        k_fit = round_to * round(k_fit / round_to)
+
+        cap_per_lane_by_fc[fc] = k_fit
+
+        debug["functional_classes"][fc_key] = {
+            "n_edges": int(len(vals)),
+            "cap_per_lane_vphpl_fit": float(k_fit),
+            "min_capacity_perlane_param": None if k_min is None else float(k_min),
+            "max_capacity_perlane_param": None if k_max is None else float(k_max),
+            "raw_p10": float(np.quantile(vals, 0.1)),
+            "raw_p50": float(np.quantile(vals, 0.5)),
+            "raw_p90": float(np.quantile(vals, 0.9)),
+            "winsor_lo": float(lo_w),
+            "winsor_hi": float(hi_w),
+        }
+
+    # Assign calibrated capacities per functional class
+    if cap_per_lane_by_fc:
+        edges["capacity_vph"] = edges["functional_class"].map(cap_per_lane_by_fc) * edges["lanes"]
+
+        for u, v, k, data in G.edges(keys=True, data=True):
+            fc = data.get("functional_class")
+            lanes = float(data.get("lanes", 1))
+            if fc in cap_per_lane_by_fc and lanes is not None and lanes > 0:
+                data["capacity_vph"] = cap_per_lane_by_fc[fc] * lanes
+
+    debug_dir = f"{scenario_dir}/input_data/traffic/debug"
+    os.makedirs(debug_dir, exist_ok=True)
+    with open(f"{scenario_dir}/input_data/traffic/debug/capacity_calibration_by_fc.json", "w") as f:
+        json.dump(debug, f, indent=2)
+
+    if save_G:
+        ox.save_graphml(G, f"{scenario_dir}/input_data/traffic/routing_graph.graphml")
+    if save_edges:
+        nodes, edges_out = ox.graph_to_gdfs(G, nodes=True, edges=True)
+        edges_out.crs = 4326
+        edges_out.to_file(f"{scenario_dir}/input_data/traffic/routing_edges.gpkg", driver="GPKG")
+
+    return G, edges
+
+def calibrate_VDFs(
+        scenario_dir,
+        G=None,
+        edges=None,
+        save_G=False,
+        save_edges=False,
+):
+    if G is None:
+        G = ox.load_graphml(f"{scenario_dir}/input_data/traffic/routing_graph.graphml")
+    if edges is None:
+        edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
+
+    for u, v, k, data in G.edges(keys=True, data=True):
+        alpha = float(data['vdf_alpha'])
+        beta = float(data['vdf_beta'])
+        ff_speed = float(data['ff_speed_kph'])
+        capacity = float(data['capacity_vph'])
+        modeled_volume = float(data.get('modeled_vol_vph'))
+        predicted_speed = ff_speed / (1 + (alpha * ((modeled_volume / capacity) ** beta)))
+        data['predicted_speed_kph'] = predicted_speed
+        data['predicted_speed_source'] = "modeled in volume estimation using default C/a/b"
+
+        peak_speed = float(data['peak_speed_kph'])
+        speed_diff = (predicted_speed - peak_speed) / peak_speed * 100
+        data['speed_diff_percent'] = speed_diff
+
+        calibration_factor = peak_speed / predicted_speed
+        data['calibration_factor'] = calibration_factor
+
+    if save_G:
+        ox.save_graphml(G, f"{scenario_dir}/input_data/traffic/routing_graph.graphml")
+    if save_edges:
+        nodes, edges = ox.graph_to_gdfs(G, nodes=True, edges=True)
+        edges.crs = 4326
+        edges.to_file(f"{scenario_dir}/input_data/traffic/routing_edges.gpkg", driver="GPKG")
+    return G, edges
+
+
+def add_and_calibrate_volume_attributes(
+        scenario_dir,
+        G=None,
+        edges=None,
+        save_G=True,
+        save_edges=True
+):
+    input_dir = f"{scenario_dir}/input_data"
+
+    if os.path.exists(f"{scenario_dir}/input_data/traffic/debug/capacity_calibration_by_fc.json"):
+        logger.info("Capacity calibration already performed, skipping all volume utils...")
+    else:
+        if G is None:
+            G = ox.load_graphml(f"{scenario_dir}/input_data/traffic/routing_graph.graphml")
+        logger.info("Matching TMAS to graph")
+        G, matches_gdf = match_tmas_stations_to_graph(
+            G,
+            f"{input_dir}/tmas/tmas.STA",
+            save_matches_gpkg_to=f"{input_dir}/traffic/tmas_station_matches.gpkg",
+        )
+
+        logger.info("applying TMAS volumes to graph")
+        G, matched_edges = apply_tmas_obs_volumes_to_graph(scenario_dir,
+                                                           G=G,
+                                                           date_start="2024-08-05",
+                                                           date_end="2024-08-09",
+                                                           hours=[8],
+                                                           )
+        G, all_edges = infer_volume(scenario_dir,
+                                    G,
+                                    matched_edges)
+        G, all_edges = calibrate_capacities_by_functional_class(scenario_dir, G, all_edges)
+        G, all_edges = calibrate_VDFs(scenario_dir,
+                                      G,
+                                      all_edges,
+                                      save_G = True,
+                                      save_edges = True)
+    return G

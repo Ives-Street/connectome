@@ -18,8 +18,10 @@ import zipfile
 import tempfile
 import shutil
 
-from traffic_utils.tomtom_speed_utils import conflate_tomtom_to_osm
-from traffic_utils.tmas_volume_utils import match_tmas_stations_to_graph
+from traffic_utils.speed_utils import conflate_tomtom_to_osm
+from traffic_utils.volume_utils import match_tmas_stations_to_graph
+
+from connectome.traffic_utils.volume_utils import infer_volume
 
 os.environ['MOBILITY_API_REFRESH_TOKEN'] = open("mobility_db_refresh_token.txt").read().rstrip("\n")
 os.environ['MAPBOX_TOKEN'] = open("mapbox_token.txt").read().rstrip("\n")
@@ -739,8 +741,7 @@ def benchmark_driving_times(analysis_areas: gpd.GeoDataFrame,
 def physical_conditions(scenario_dir,
                         traffic_datasource = None, #None, "mapbox", or "tomtom"
                         volume_datasource = None, #None or "tmas"
-                        mapbox_num_traffic_groups=7,
-                        mapbox_sample_count_per_group=2,
+                        transcad_source = True,
                         ):
     input_dir = f"{scenario_dir}/input_data/"
     analysis_areas = gpd.read_file(f"{input_dir}/analysis_areas.gpkg")
@@ -748,7 +749,7 @@ def physical_conditions(scenario_dir,
 
     # Get OSM data if it doesn't exist
     if not os.path.exists(f"{input_dir}/osm_study_area.pbf"):
-        print("downloading osm data")
+        print("preparing osm data")
         download_osm(
             analysis_areas,
             f"{input_dir}/osm_large_file.pbf",
@@ -758,59 +759,37 @@ def physical_conditions(scenario_dir,
         )
         make_osm_editable(f"{input_dir}/osm_study_area.pbf", f"{input_dir}/osm_study_area_editable.osm")
 
-    if traffic_datasource == "mapbox": #TODO remove/deprecate? this is unfinished, it doesn't actually save the driving times. But that's okay, I'm using tomtom now.
-        if not os.path.exists(f"{input_dir}/traffic_sample_triptimes.csv"):
-            # First create traffic groups
-            analysis_areas = groupings_for_traffic_estimates(analysis_areas, mapbox_num_traffic_groups)
-            # Then select sample points within each group
-            analysis_areas = select_traffic_samples_by_group(analysis_areas, mapbox_sample_count_per_group)
-
-            # And call Mapbox for actual driving times
-            driving_times = benchmark_driving_times(analysis_areas,
-                                                    os.environ['MAPBOX_TOKEN'],
-                                                    f"{scenario_dir}/input_data/traffic_sample_triptimes.csv")
-
-        # Remove any existing index-related columns before saving
-        columns_to_drop = [col for col in analysis_areas.columns if col in ['level_0', 'index']]
-        if columns_to_drop:
-            analysis_areas = analysis_areas.drop(columns=columns_to_drop)
-
-        analysis_areas.to_file(f"{input_dir}/analysis_areas.gpkg", driver="GPKG")
-
 
     #todo consider function calls here to interpolate capacities and volumes?
 
-    elif traffic_datasource == "tomtom":
-        os.makedirs(f"{input_dir}/traffic/pre_benchmark/", exist_ok=True)
+    if traffic_datasource == "tomtom":
+        os.makedirs(f"{input_dir}/traffic/", exist_ok=True)
         if not (os.path.exists(f"{input_dir}/tomtom/tomtom_geom.geojson") and
              os.path.exists(f"{input_dir}/tomtom/tomtom_speeds.json")):
             raise FileNotFoundError(f"Tomtom input data not found in {input_dir}/tomtom/tomtom_geom.geojson and tomtom_speeds.json. Please download.")
 
 
-        if not os.path.exists(f"{input_dir}/traffic/pre_benchmark/routing_graph.graphml"):
-            conflate_tomtom_to_osm(
-               f"{input_dir}/osm_study_area_editable.osm",
+        if not os.path.exists(f"{input_dir}/traffic/routing_graph.graphml"):
+            G, _, _, _, _ =conflate_tomtom_to_osm(
+               scenario_dir,
                 f"{input_dir}/tomtom/tomtom_speeds.json",
                 f"{input_dir}/tomtom/tomtom_geom.geojson",
+                tomtom_night_stats_path = f"{input_dir}/tomtom/tomtom_night_speeds.json",
+                tomtom_night_geom_path = f"{input_dir}/tomtom/tomtom_night_geom.geojson",
                 debug_gpkg_prefix = f"{input_dir}/tomtom/debug",
-                save_graphml_to = f"{input_dir}/traffic/pre_benchmark/routing_graph.graphml",
-                save_nodes_to = f"{input_dir}/traffic/pre_benchmark/nodes.gpkg",
-                save_edges_to = f"{input_dir}/traffic/pre_benchmark/edges.gpkg",
             )
+        else:
+            G = ox.load_graphml(f"{scenario_dir}/input_data/traffic/routing_graph.graphml")
 
-    if volume_datasource == "tmas":
-        os.makedirs(f"{input_dir}/traffic/pre_benchmark/", exist_ok=True)
-        if not (os.path.exists(f"{input_dir}/tmas/tmas.VOL") and
-                os.path.exists(f"{input_dir}/tmas/tmas.STA")):
-            raise FileNotFoundError(
-                f"TMAS input data not found in {input_dir}/tmas/tmas.VOL and {input_dir}/tmas/tmas.STA. Please download."
-            )
-        if not os.path.exists(f"{input_dir}/traffic/pre_benchmark/graph_with_speed_and_volumes.graphml"):
-            match_tmas_stations_to_graph(
-                f"{input_dir}/traffic/pre_benchmark/routing_graph.graphml",
-                f"{input_dir}/tmas/tmas.STA",
-                save_matches_gpkg_to = f"{input_dir}/traffic/pre_benchmark/tmas_station_matches.gpkg",
-            )
+    # if bool(transcad_source):
+    #     conflate_transcad_to_osm_graph(
+    #         G,
+    #         scenario_dir,
+    #         f"{input_dir}transcad/AM2.shp",
+    #         f"{input_dir}transcad/AM2.xlsx",
+    #     )
+
+
 
     # Get GTFS data if it doesn't exist
     if (
