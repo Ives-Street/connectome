@@ -37,7 +37,7 @@ Test scenarios exist in `connectome/testing/` (denver40, denver20, lewes, burlin
 
 The system runs as a linear pipeline, with each stage producing cached files that allow re-running from intermediate points:
 
-1. **Setup** (`setup/`) — Downloads census boundaries, population demographics, employment (LODES), POIs (Overture), and road/transit networks (OSM, GTFS). Creates user classes from income × car-ownership matrix.
+1. **Setup** (`setup/`) — Downloads census boundaries, population demographics, employment (LODES), POIs (Overture), and road/transit networks (OSM, GTFS). Creates user classes from population information, with each user class representing a group that experiences the transportation network differently in some way (has different generalized impedance functions).
 
 2. **Representation** (`representation.py` → `setup/define_experiences.py`) — Translates the objective physical network into subjective routing environments that reflect how different user classes experience the same infrastructure (e.g., tolls cost more minutes to lower-income drivers, bike networks differ by stress tolerance). Creates routing environment directories with modified network files, and returns a dataframe mapping each user class to its routing environment per mode. Multiple user classes often share the same environment for a given mode.
 
@@ -88,6 +88,10 @@ For detailed file listings per scenario stage, see `docs/scenario_files.md`.
 - Cached intermediate files mean re-running a stage won't pick up upstream changes unless you delete the cached outputs. When in doubt, delete the relevant output files and re-run.
 - OSM PBF files are rewritten per routing environment — don't assume `osm_file.pbf` in a routeenv directory matches the original study area extract.
 
+## Communication
+
+When a message ends with `!N` (e.g. `!50`), target roughly N words in the response. Flex up or down if it genuinely helps.
+
 ## Sensitive Files
 
-`mapbox_token.txt` and `mobility_db_refresh_token.txt` in the connectome directory contain API credentials — do not commit or expose these.
+`connectome/api_keys/` contains API credential files The entire directory is gitignored — do not commit or expose these files.

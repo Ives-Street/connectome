@@ -1,5 +1,6 @@
 
 import os
+from pathlib import Path
 import osmnx as ox
 import subprocess
 import shapely
@@ -23,8 +24,9 @@ from traffic_utils.volume_utils import match_tmas_stations_to_graph
 
 from connectome.traffic_utils.volume_utils import infer_volume
 
-os.environ['MOBILITY_API_REFRESH_TOKEN'] = open("mobility_db_refresh_token.txt").read().rstrip("\n")
-os.environ['MAPBOX_TOKEN'] = open("mapbox_token.txt").read().rstrip("\n")
+_api_keys_dir = Path(__file__).resolve().parent.parent / "api_keys"
+os.environ['MOBILITY_API_REFRESH_TOKEN'] = (_api_keys_dir / "mobility_db_refresh_token.txt").read_text().rstrip("\n")
+os.environ['MAPBOX_TOKEN'] = (_api_keys_dir / "mapbox_token.txt").read_text().rstrip("\n")
 
 def download_osm(geometry: gpd.GeoDataFrame, #unbuffered
                 save_to_unclipped: str,
@@ -230,7 +232,7 @@ def get_GTFS_from_mobility_database(
         ):
     """
     Downloads GTFS feeds from the Mobility Database API and saves them to the specified directory.
-    Relies on loading an API refresh key from mobility_db_refresh_token.txt
+    Relies on loading an API refresh key from api_keys/mobility_db_refresh_token.txt
     Args:
         geometry:
         save_to_dir:

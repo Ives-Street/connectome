@@ -101,10 +101,11 @@ def _exempt_set_suffix(exempt_set: Set[str]) -> str:
 
 def get_acs_data_for_tracts(tracts: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     print("getting ACS data for tracts")
-    try:
-        census_api_key = open("census_api_key.txt").read().rstrip("\n")
-    except FileNotFoundError:
-        raise FileNotFoundError("census_api_key.txt not found. Get a key at https://api.census.gov/data/key_signup.html")
+    api_keys_dir = Path(__file__).resolve().parent.parent / "api_keys"
+    census_key_path = api_keys_dir / "census_api_key.txt"
+    if not census_key_path.exists():
+        raise FileNotFoundError(f"{census_key_path} not found. Get a key at https://api.census.gov/data/key_signup.html")
+    census_api_key = census_key_path.read_text().rstrip("\n")
     c = Census(census_api_key)
     acs_variable_names = list(acs_variables.keys())
     

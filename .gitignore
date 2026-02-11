@@ -147,7 +147,5 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# api tokens
-mobility_db_refresh_token.txt
-mapbox_token.txt
-census_api_key.txt
+# api keys
+connectome/api_keys/
