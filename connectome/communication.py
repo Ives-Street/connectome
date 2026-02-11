@@ -1085,3 +1085,69 @@ def compare_scenarios(
         print(f"{'=' * 60}\n")
 
     return uc_comparison, geom_comparison
+
+
+def summarize_compared_results(scenario_dir):
+    """Summarize traffic statistics for a scenario that has already been compared with existing conditions."""
+    traffic_edges = gpd.read_file(f"{scenario_dir}/input_data/traffic/routing_edges.gpkg")
+
+    save_cols_as_numeric = ['ff_speed_kph', 'obs_speed_kph', 'tomtom_sample_size',
+                            'tomtom_night_speed_kph', 'tomtom_sample_size_night', 'peak_speed_kph', 'modeled_vol_vph',
+                            'forecast_speed_kph', "peak_traversal_time_sec", 'post_induction_vol_vph',
+                            'scenario_delay_veh_min',
+                            'calibration_factor', 'relative_demand', 'induced_volume', 'speed_diff_percent',
+                            'previous_peak_speed_kph', 'previous_traversal_time']
+
+    for col in save_cols_as_numeric:
+        traffic_edges[col] = traffic_edges[col].astype(float)
+
+    traffic_edges['sc_delay_veh_min_per_mile'] = traffic_edges['scenario_delay_veh_min'] / (traffic_edges['length'] / 1609)
+
+    out_dir = f"{scenario_dir}/prepared_results/"
+
+    stats = {}
+    metrics = [
+        'length', 'modeled_vol_vph', 'capacity_vph', 'ff_speed_kph',
+        'peak_speed_kph', 'forecast_speed_kph', 'v_c_ratio',
+        'induced_volume', 'forecast_speed_change_percent',
+        'scenario_delay_veh_sec', 'scenario_delay_veh_min',
+        'induced_vmt', 'sc_delay_veh_min_per_mile'
+    ]
+
+    for metric in metrics:
+        if metric in traffic_edges.columns:
+            data = traffic_edges[metric].dropna().astype(float)
+            if not data.empty:
+                stats[metric] = {
+                    'count': len(data),
+                    'mean': float(data.mean()),
+                    'median': float(data.median()),
+                    'std': float(data.std()),
+                    'min': float(data.min()),
+                    'max': float(data.max()),
+                    'sum': float(data.sum()),
+                }
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Save machine-readable JSON
+    with open(f"{out_dir}/traffic_statistics.json", 'w') as f:
+        json.dump(stats, f, indent=2)
+
+    # Save human-readable text summary
+    with open(f"{out_dir}/traffic_statistics.txt", 'w') as f:
+        f.write("Traffic Network Statistics Summary\n")
+        f.write("================================\n\n")
+        for metric, values in stats.items():
+            f.write(f"{metric}:\n")
+            f.write(f"  Count: {values['count']:,.0f}\n")
+            f.write(f"  Mean: {values['mean']:,.2f}\n")
+            f.write(f"  Median: {values['median']:,.2f}\n")
+            f.write(f"  Std Dev: {values['std']:,.2f}\n")
+            f.write(f"  Min: {values['min']:,.2f}\n")
+            f.write(f"  Max: {values['max']:,.2f}\n")
+            f.write(f"  Sum: {values['sum']:,.2f}\n\n")
+
+    traffic_edges.to_file(f"{out_dir}/routing_edges.gpkg", driver="GPKG")
+
+    logger.info(f"saved traffic statistics to {out_dir}")

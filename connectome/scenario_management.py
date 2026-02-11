@@ -31,15 +31,13 @@ from setup.geography_utils import (
     calculate_population_per_sqkm,
 )
 
-from setup.populate_destinations import populate_all_dests_USA, populate_destinations_overture_places
+from setup.populate_destinations import populate_all_dests_USA
 
-from setup.define_valuations import generalize_destination_units
 from routing_and_impedance import route_for_all_envs
 from representation import apply_experience_defintions
 from evaluation import evaluate_scenario
 from traffic_utils.assignment import recalculate_speeds, relative_to_absolute_induced_demand, save_traffic_stats
 from traffic_utils.volume_utils import add_and_calibrate_volume_attributes
-from traffic_utils.speed_utils import compute_bearing
 
 import communication
 
@@ -135,21 +133,6 @@ def initialize_existing_conditions(scenario_dir,
     os.makedirs(f"{scenario_dir}/input_data", exist_ok=True)
     input_dir = f'{scenario_dir}/input_data'
 
-    # ---------------------------------------------------------
-    # Define study area polygon (EPSG:4326) if lat/lon/buffer given
-    # ---------------------------------------------------------
-    study_area_geom_4326 = None
-    if (lat is not None) and (lon is not None) and (buffer is not None):
-        # Start from a point in EPSG:4326
-        center_ll = gpd.GeoSeries([Point(lon, lat)], crs="EPSG:4326")
-        # Project to a metric CRS (WebMercator) for buffering in meters
-        center_m = center_ll.to_crs(3857)
-        # Buffer by the requested distance (meters)
-        study_area_m = center_m.buffer(buffer)
-        # Project buffered polygon back to EPSG:4326
-        study_area_ll = study_area_m.to_crs(4326)
-        study_area_geom_4326 = study_area_ll.unary_union
-
     # get census tracts
     os.makedirs(f"{input_dir}/census", exist_ok=True)
     if not os.path.exists(f"{input_dir}/census/census_tracts.gpkg"):
@@ -197,7 +180,7 @@ def initialize_existing_conditions(scenario_dir,
 
     if not os.path.exists(f"{input_dir}/census/census_tracts_with_dests.gpkg"):
         logger.info("populating overture destinations")
-        tracts_with_dests = populate_all_dests_USA(
+        populate_all_dests_USA(
             geographies=census_tracts,
             states=states,
             already_tracts=True,
@@ -205,8 +188,6 @@ def initialize_existing_conditions(scenario_dir,
         )
     else:
         logger.info("loading destinations from disk")
-        analysis_areas = gpd.read_file(f"{input_dir}/census/census_tracts_with_dests.gpkg")
-        analysis_areas.index = analysis_areas['geom_id'].values
 
     # determine analysis areas
     # if we're using census tracts as the TAZs, copy them directly
@@ -297,8 +278,6 @@ def redistribute_traffic_hncw(G, fraction_to_redistribute = 0.8):
     capacity_factor = 0.9
 
     i270_target_bearing = 135
-    i70_target_bearing = 90
-    i25_target_bearing = 180
 
     G = ox.add_edge_bearings(G)
 
@@ -540,75 +519,6 @@ def create_denver_hcnw_scenario(
     logger.info("copying ttms")
     copy_ttms(scenario_dir, new_scenario_dir, modes_to_copy = ['WALK',"BICYCLE","TRANSIT"])
 
-def compared_prepare_results(scenario_dir):
-    #relies on scenarios and comparison with EC having been run
-    comparison_results = gpd.read_file(f"{scenario_dir}/comparison/geometry_comparison.gpkg")
-    traffic_edges = gpd.read_file(f"{scenario_dir}/input_data/traffic/routing_edges.gpkg")
-
-    save_cols_as_numeric = ['ff_speed_kph', 'obs_speed_kph', 'tomtom_sample_size',
-                            'tomtom_night_speed_kph', 'tomtom_sample_size_night', 'peak_speed_kph', 'modeled_vol_vph',
-                            'forecast_speed_kph', "peak_traversal_time_sec", 'post_induction_vol_vph',
-                            'scenario_delay_veh_min',
-                            'calibration_factor', 'relative_demand', 'induced_volume', 'speed_diff_percent',
-                            'previous_peak_speed_kph', 'previous_traversal_time']
-
-    for col in save_cols_as_numeric:
-        traffic_edges[col] = traffic_edges[col].astype(float)
-
-    traffic_edges['sc_delay_veh_min_per_mile'] = traffic_edges['scenario_delay_veh_min'] / (traffic_edges['length'] / 1609)
-
-    out_dir = f"{scenario_dir}/prepared_results/"
-
-    stats = {}
-    metrics = [
-        'length', 'modeled_vol_vph', 'capacity_vph', 'ff_speed_kph',
-        'peak_speed_kph', 'forecast_speed_kph', 'v_c_ratio',
-        'induced_volume', 'forecast_speed_change_percent',
-        'scenario_delay_veh_sec', 'scenario_delay_veh_min',
-        'induced_vmt', 'sc_delay_veh_min_per_mile'
-    ]
-
-    for metric in metrics:
-        if metric in traffic_edges.columns:
-            data = traffic_edges[metric].dropna().astype(float)
-            if not data.empty:
-                stats[metric] = {
-                    'count': len(data),
-                    'mean': float(data.mean()),
-                    'median': float(data.median()),
-                    'std': float(data.std()),
-                    'min': float(data.min()),
-                    'max': float(data.max()),
-                    'sum': float(data.sum()),
-                }
-
-    os.makedirs(out_dir, exist_ok=True)
-
-    # Save machine-readable JSON
-    with open(f"{out_dir}/traffic_statistics.json", 'w') as f:
-        json.dump(stats, f, indent=2)
-
-    # Save human-readable text summary
-    with open(f"{out_dir}/traffic_statistics.txt", 'w') as f:
-        f.write("Traffic Network Statistics Summary\n")
-        f.write("================================\n\n")
-        for metric, values in stats.items():
-            f.write(f"{metric}:\n")
-            f.write(f"  Count: {values['count']:,.0f}\n")
-            f.write(f"  Mean: {values['mean']:,.2f}\n")
-            f.write(f"  Median: {values['median']:,.2f}\n")
-            f.write(f"  Std Dev: {values['std']:,.2f}\n")
-            f.write(f"  Min: {values['min']:,.2f}\n")
-            f.write(f"  Max: {values['max']:,.2f}\n")
-            f.write(f"  Sum: {values['sum']:,.2f}\n\n")
-    stats = {}
-
-
-    os.makedirs(f"{scenario_dir}/prepared_results/", exist_ok=True)
-    traffic_edges.to_file(f"{scenario_dir}/prepared_results/routing_edges.gpkg", driver="GPKG")
-
-    print(stats)
-
 if __name__ == "__main__":
     study_name = "denver20"
     # communication.compare_scenarios(f"testing/{study_name}", "existing_conditions", "cdot_scenario")
@@ -649,10 +559,10 @@ if __name__ == "__main__":
     run_scenario(f"testing/{study_name}/hcnw_scenario/")
 
     communication.compare_scenarios(f"testing/{study_name}", "existing_conditions", "cdot_scenario")
-    compared_prepare_results(f"testing/{study_name}/cdot_scenario/")
+    communication.summarize_compared_results(f"testing/{study_name}/cdot_scenario/")
 
     communication.compare_scenarios(f"testing/{study_name}", "existing_conditions", "hcnw_scenario")
-    compared_prepare_results(f"testing/{study_name}/hcnw_scenario/")
+    communication.summarize_compared_results(f"testing/{study_name}/hcnw_scenario/")
 
     # create_denver_hcnw_scenario("testing/denver/existing_conditions/",
     #                             "testing/denver/hcnw_scenario/")
@@ -664,64 +574,3 @@ if __name__ == "__main__":
     #                                 "existing_conditions",
     #                                 "hcnw_scenario")
 
-def pl3():
-    traffic_datasource = "tomtom"
-    volume_datasource = "tmas"
-    initialize_existing_conditions(
-        scenario_dir="testing/minidenver/existing_conditions/",
-        states=["CO"],
-        lat=39.805084,
-        lon=-104.940186,
-        buffer=10000,
-        traffic_datasource=traffic_datasource,
-        volume_datasource=volume_datasource,
-    )
-    run_scenario("testing/minidenver/existing_conditions/",
-                 track_volumes={
-                                "checkpoint_node_ids": None,
-                                "checkpoint_edge_attr": "ref",
-                                "checkpoint_edge_values": ['I 270']},
-                 )
-    create_denver_cdot_scenario("testing/minidenver/existing_conditions/", "testing/minidenver/cdot_scenario/")
-    run_scenario("testing/minidenver/cdot_scenario/")
-    communication.compare_scenarios("testing/minidenver", "existing_conditions", "cdot_scenario")
-    # create_denver_cdot_scenario("testing/denver/existing_conditions/",
-    #                             "testing/denver/cdot_scenario/")
-    # create_denver_hcnw_scenario("testing/denver/existing_conditions/",
-    #                             "testing/denver/hcnw_scenario/")
-    # run_scenario("testing/denver/cdot_scenario/")
-    # run_scenario("testing/denver/hcnw_scenario/")
-    # communication.compare_scenarios("testing/denver",
-    #                                 "existing_conditions",
-    #                                 "cdot_scenario")
-    # communication.compare_scenarios("testing/denver",
-    #                                 "existing_conditions",
-    #                                 "hcnw_scenario")
-
-
-
-
-def test():
-    traffic_datasource = "tomtom"
-    volume_datasource = "tmas"
-    initialize_existing_conditions(
-        scenario_dir="testing/lewes/existing_conditions/",
-        states=["DE"],
-        lat=38.770,
-        lon=-75.1444,
-        buffer=9000,
-        traffic_datasource=traffic_datasource,
-        volume_datasource=volume_datasource,
-        transcad_source=False,
-
-    )
-    run_scenario("testing/lewes/existing_conditions/",
-                 track_volumes={
-                                "checkpoint_node_ids": None,
-                                "checkpoint_edge_attr": "ref",
-                                "checkpoint_edge_values": ['DE 1', 'US 9;DE 1']},
-                 induced_demand_annual_vmt = 33000000,
-                 )
-    create_lewes_cdot_scenario("testing/lewes/existing_conditions/", "testing/lewes/cdot_scenario/")
-    run_scenario("testing/lewes/cdot_scenario/")
-    communication.compare_scenarios("testing/lewes", "existing_conditions", "cdot_scenario")
