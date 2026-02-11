@@ -35,6 +35,43 @@ MODES = [
     #"SHARED_BICYCLE",
 ]
 
+
+### helpers for toll exemption logic (TODO: move to utils file)
+import re
+from typing import Any, FrozenSet, Iterable, Set
+
+_SAFE_FACILITY_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _normalize_ref(ref_val: Any) -> str | None:
+    """Normalize an OSM 'ref' tag to a single string (or None)."""
+    if ref_val is None:
+        return None
+    if isinstance(ref_val, list) and ref_val:
+        ref_val = ref_val[0]
+    ref_str = str(ref_val).strip()
+    return ref_str if ref_str else None
+
+
+def _validate_facility_keys_or_raise(facility_keys: Iterable[str]) -> None:
+    bad = [k for k in facility_keys if not _SAFE_FACILITY_RE.match(str(k))]
+    if bad:
+        raise ValueError(
+            "Unsafe facility key(s) for exempt_{facility} columns / IDs. "
+            "Expected keys to match ^[A-Za-z0-9_]+$: "
+            f"{bad}"
+        )
+
+
+def _exempt_set_suffix(ex_set: Set[str]) -> str:
+    """'noexempt' or '{A_B}exempt' (sorted join)"""
+    if not ex_set:
+        return "noexempt"
+    return f"{'_'.join(sorted(ex_set))}exempt"
+
+### end helpers for toll exemption logic
+
+
 class SimplestLTSAdder(osmium.SimpleHandler):
     def __init__(self, writer, max_lts):
         osmium.SimpleHandler.__init__(self)
@@ -172,20 +209,52 @@ def define_experiences(input_dir,
     # all subgroups experience the city the same way for CAR, TRANSIT, and WALK,
     # and there are only four different options for BIKE
 
-    # TODO - this is where we'll have to adjust link-level driving impedances for toll roads
-
     logger.info("Looking for toll roads in the graph...")
     G = ox.load_graphml(f"{input_traffic_dir}/routing_graph.graphml")
 
+    toll_ex_cfg = (traffic_params or {}).get("toll_exemptions", {}) or {}
+    exemptions_cfg = (toll_ex_cfg.get("exemptions", {}) or {})
+    requested_exempt_facilities = set(exemptions_cfg.keys())
+    _validate_facility_keys_or_raise(requested_exempt_facilities)
+
+    # Ensure exemption columns exist if requested (fail fast if schema drift)
+    for fac in requested_exempt_facilities:
+        col = f"exempt_{fac}"
+        if col not in user_classes.columns:
+            raise KeyError(
+                f"Expected column '{col}' in user_classes.csv but it was not found. "
+                "Re-run populate_people_usa.py to regenerate user_classes.csv with exemption columns."
+            )
+
     # If we've already stored this info on the graph, reuse it
     toll_edges: list[tuple] = []
+    tolled_refs_in_graph: set[str] = set()
 
-    # Single pass: collect tolled edges and infer any_roads_tolled
+    # Single pass: collect tolled edges AND refs on tolled edges
     for u, v, key, data in G.edges(keys=True, data=True):
         if data.get("toll") == "yes":
             toll_edges.append((u, v, key))
+            ref_norm = _normalize_ref(data.get("ref"))
+            if ref_norm is not None:
+                tolled_refs_in_graph.add(ref_norm)
 
     any_roads_tolled = len(toll_edges) > 0
+
+    present_exempt_facilities = requested_exempt_facilities.intersection(tolled_refs_in_graph)
+
+    if any_roads_tolled:
+        logger.info("Toll roads identified (%d tolled edges)", len(toll_edges))
+        if requested_exempt_facilities:
+            logger.info(
+                "Requested exempt facilities: %s",
+                sorted(list(requested_exempt_facilities)),
+            )
+            logger.info(
+                "Exempt facilities present on tolled edges: %s",
+                sorted(list(present_exempt_facilities)),
+            )
+    else:
+        logger.info("No toll roads found in the graph")
 
     if any_roads_tolled:
         logger.info("Toll roads identified (%d tolled edges)", len(toll_edges))
@@ -224,65 +293,136 @@ def define_experiences(input_dir,
         toll_costs = traffic_params["toll_cost_per_km"]
         time_value_rate = traffic_params["value_of_travel_time"]["personal_medium_value"]  # expected 0.25
 
-        logger.info("Creating separate routing environments for each income group")
-        for max_income in tqdm(list(user_classes.max_income.unique())):
-            income_routeenv_id = f"driving_income_{max_income}"
-            os.makedirs(f"{destination_dir}/{income_routeenv_id}/traffic/", exist_ok=True)
+        # Decide whether we actually need exemption-specific envs
+        build_exempt_envs = len(present_exempt_facilities) > 0
 
+        # Distinct exemption-sets among CAR userclasses, restricted to facilities present in graph
+        # Always include baseline empty-set.
+        unique_exempt_sets: set[FrozenSet[str]] = {frozenset()}
+
+        if build_exempt_envs:
+            for _, row in user_classes.iterrows():
+                if str(row.get("car_owner")) != "car":
+                    continue
+                ex_set = {
+                    fac
+                    for fac in present_exempt_facilities
+                    if int(row.get(f"exempt_{fac}", 0) or 0) == 1
+                }
+                unique_exempt_sets.add(frozenset(ex_set))
+
+            logger.info(
+                "Creating exemption-specific driving routing environments: %d exemption-set(s) x %d income group(s)",
+                len(unique_exempt_sets),
+                len(list(user_classes.max_income.unique())),
+            )
+        else:
+            logger.info(
+                "No requested exempt facilities are present on tolled edges; "
+                "creating income-only driving routing environments (current behavior)."
+            )
+
+        for max_income in tqdm(list(user_classes.max_income.unique())):
             hourly_wage = max_income / 1800
             dollars_per_second = hourly_wage * (1 / 60) * (1 / 60)
             seconds_per_dollar = 1 / dollars_per_second
             seconds_per_dollar_adj = seconds_per_dollar / time_value_rate  # kept if you want to use it later
 
-            income_group_graph = G.copy()
+            # Iterate either once (income-only) or over exemption sets (income x exempt)
+            ex_sets_iter = [frozenset()] if not build_exempt_envs else sorted(
+                list(unique_exempt_sets),
+                key=lambda s: _exempt_set_suffix(set(s)),
+            )
 
-            # Only iterate over tolled edges instead of all edges
-            for u, v, key in toll_edges:
-                data = income_group_graph.edges[u, v, key]
+            for ex_set_fs in ex_sets_iter:
+                ex_set = set(ex_set_fs)
+                suffix = _exempt_set_suffix(ex_set)
 
-                link_ref = data.get("ref")
-                if isinstance(link_ref, list):
-                    link_ref = link_ref[0]
+                income_routeenv_id = f"driving_income_{max_income}__{suffix}"
+                os.makedirs(f"{destination_dir}/{income_routeenv_id}/traffic/", exist_ok=True)
 
-                toll_cost_per_km = toll_costs.get(link_ref, toll_costs["default"])
+                income_group_graph = G.copy()
 
-                if data.get("scenario_toll") == "yes":
-                    general_lane_traversal_time = data["traversal_time_sec"]
-                    express_lane_length_m = float(data["length"])
-                    express_lane_speed_kph = float(data["ff_speed_kph"])
-                    express_lane_speed_mps = express_lane_speed_kph / 3.6
-                    express_traversal_time = express_lane_length_m / express_lane_speed_mps
-                    express_time_penalty = (express_lane_length_m / 1000) * toll_cost_per_km * seconds_per_dollar
-                    express_total_timecost = express_traversal_time + express_time_penalty
-                    selected_cost = min(express_total_timecost, general_lane_traversal_time)
-                    income_group_graph.edges[u, v, key]["traversal_time_sec"] = selected_cost
-                else:
-                    time_penalty = (float(data["length"]) / 1000) * toll_cost_per_km * seconds_per_dollar
-                    if data.get("ref") == "I270_NoWidening":
+                # Only iterate over tolled edges
+                for u, v, key in toll_edges:
+                    data = income_group_graph.edges[u, v, key]
+
+                    link_ref = _normalize_ref(data.get("ref"))
+                    toll_cost_per_km = toll_costs.get(link_ref, toll_costs["default"])
+
+                    # If exempt for this facility, waive toll penalty for this edge (toll cost becomes 0)
+                    if link_ref is not None and link_ref in ex_set:
+                        toll_cost_per_km = 0.0
+
+                    if data.get("scenario_toll") == "yes":
+                        general_lane_traversal_time = data["traversal_time_sec"]
                         express_lane_length_m = float(data["length"])
                         express_lane_speed_kph = float(data["ff_speed_kph"])
                         express_lane_speed_mps = express_lane_speed_kph / 3.6
                         express_traversal_time = express_lane_length_m / express_lane_speed_mps
-                        income_group_graph.edges[u, v, key]["peak_traversal_time_sec"] = (
-                            express_traversal_time + time_penalty
-                        )
+
+                        express_time_penalty = (express_lane_length_m / 1000) * toll_cost_per_km * seconds_per_dollar
+                        express_total_timecost = express_traversal_time + express_time_penalty
+                        selected_cost = min(express_total_timecost, general_lane_traversal_time)
+                        income_group_graph.edges[u, v, key]["traversal_time_sec"] = selected_cost
                     else:
-                        existing_time = float(income_group_graph.edges[u, v, key]["peak_traversal_time_sec"])
-                        income_group_graph.edges[u, v, key]["peak_traversal_time_sec"] = existing_time + time_penalty
+                        time_penalty = (float(data["length"]) / 1000) * toll_cost_per_km * seconds_per_dollar
 
-            ox.save_graphml(
-                income_group_graph,
-                f"{destination_dir}/{income_routeenv_id}/traffic/routing_graph.graphml",
-            )
-            if save_traffic_edges:
-                edges = ox.graph_to_gdfs(income_group_graph, nodes=False, edges=True)
-                edges.to_file(
-                    f"{destination_dir}/{income_routeenv_id}/traffic/edges.gpkg",
-                    driver="GPKG",
+                        # Preserve your existing special-case behavior; exemption makes time_penalty 0
+                        if data.get("ref") == "I270_NoWidening":
+                            express_lane_length_m = float(data["length"])
+                            express_lane_speed_kph = float(data["ff_speed_kph"])
+                            express_lane_speed_mps = express_lane_speed_kph / 3.6
+                            express_traversal_time = express_lane_length_m / express_lane_speed_mps
+                            income_group_graph.edges[u, v, key]["peak_traversal_time_sec"] = (
+                                    express_traversal_time + time_penalty
+                            )
+                        else:
+                            existing_time = float(income_group_graph.edges[u, v, key]["peak_traversal_time_sec"])
+                            income_group_graph.edges[u, v, key][
+                                "peak_traversal_time_sec"] = existing_time + time_penalty
+
+                ox.save_graphml(
+                    income_group_graph,
+                    f"{destination_dir}/{income_routeenv_id}/traffic/routing_graph.graphml",
                 )
+                if save_traffic_edges:
+                    edges = ox.graph_to_gdfs(income_group_graph, nodes=False, edges=True)
+                    edges.to_file(
+                        f"{destination_dir}/{income_routeenv_id}/traffic/edges.gpkg",
+                        driver="GPKG",
+                    )
 
-            selector = user_classes["max_income"] == max_income
-            user_classes.loc[selector, "routeenv_CAR"] = income_routeenv_id
+                # Assign to CAR userclasses:
+                # - if not building exempt envs: keep income-only behavior for everyone
+                # - if building exempt envs: CAR rows go to income x exemption-set env; nocar stays income-only (noexempt)
+                if not build_exempt_envs:
+                    selector = user_classes["max_income"] == max_income
+                    user_classes.loc[selector, "routeenv_CAR"] = income_routeenv_id
+                else:
+                    if not ex_set:
+                        # also use this env for nocar (no exemption variants)
+                        selector_nocar = (user_classes["max_income"] == max_income) & (
+                                    user_classes["car_owner"] != "car")
+                        user_classes.loc[selector_nocar, "routeenv_CAR"] = income_routeenv_id
+
+                    selector_car = (user_classes["max_income"] == max_income) & (user_classes["car_owner"] == "car")
+                    if ex_set:
+                        # exempt: match rows where all facilities in ex_set are 1, and all other present facilities are 0
+                        selector_car = selector_car.copy()
+                        for fac in present_exempt_facilities:
+                            col = f"exempt_{fac}"
+                            want = 1 if fac in ex_set else 0
+                            selector_car = selector_car & (
+                                        pd.to_numeric(user_classes[col], errors="coerce").fillna(0).astype(int) == want)
+                    else:
+                        # noexempt: all present facilities must be 0
+                        for fac in present_exempt_facilities:
+                            col = f"exempt_{fac}"
+                            selector_car = selector_car & (
+                                        pd.to_numeric(user_classes[col], errors="coerce").fillna(0).astype(int) == 0)
+
+                    user_classes.loc[selector_car, "routeenv_CAR"] = income_routeenv_id
 
     # C: Finally, let's do the bike options
 
@@ -310,6 +450,15 @@ def define_experiences(input_dir,
 
         selector = user_classes['max_bicycle'] == f'bike_lts{lts}'
         user_classes.loc[selector, "routeenv_BICYCLE"] = bike_env_id
+
+    if any_roads_tolled:
+        missing = user_classes[user_classes["routeenv_CAR"].isna()]
+        if len(missing) > 0:
+            raise RuntimeError(
+                f"Some userclasses were not assigned a CAR routing environment ({len(missing)} rows). "
+                "This usually indicates exemption columns/type mismatch or selector logic drift."
+            )
+
     if not save_userclasses_to == "":
         user_classes.to_csv(save_userclasses_to)
     return user_classes

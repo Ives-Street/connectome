@@ -64,6 +64,22 @@ def load_gtms_for_userclasses(scenario_dir, user_classes):
             if os.path.exists(filename):
                 print("loading", filename)
                 gtm = load_gtm(filename)
+
+                # --- Normalize geom_id representation across all modes ---
+                # Force both index (origins) and columns (destinations)
+                # to be strings so intersections in choose_modes_for_userclasses
+                # work even if some CSVs were written with numeric geom_ids
+                # and others with string geom_ids.
+                try:
+                    gtm.index = gtm.index.astype(str)
+                except Exception:
+                    # Fallback: ensure index is a plain Index of strings
+                    gtm.index = pd.Index(map(str, gtm.index))
+                try:
+                    gtm.columns = gtm.columns.astype(str)
+                except Exception:
+                    gtm.columns = pd.Index(map(str, gtm.columns))
+
                 gtms[userclass][mode] = gtm
     return gtms
 
@@ -113,6 +129,16 @@ def choose_modes_for_userclasses(scenario_dir,
         mode_names = list(impedance_matrices_by_mode.keys())
         matrices = [impedance_matrices_by_mode[m] for m in mode_names]
 
+        # Ensure all matrices use string geom_ids (defensive, in case
+        # some matrices are constructed elsewhere without normalization).
+        for i, mat in enumerate(matrices):
+            if not isinstance(mat.index, pd.Index) or not isinstance(mat.columns, pd.Index):
+                mat = mat.copy()
+            mat.index = mat.index.astype(str)
+            mat.columns = mat.columns.astype(str)
+            matrices[i] = mat
+            impedance_matrices_by_mode[mode_names[i]] = mat
+
         # Compute common index and columns
         common_index = matrices[0].index
         common_cols = matrices[0].columns
@@ -123,8 +149,10 @@ def choose_modes_for_userclasses(scenario_dir,
         if len(common_index) == 0 or len(common_cols) == 0:
             raise ValueError(
                 f"For userclass '{userclass}', impedance matrices have no overlapping "
-                f"origins or destinations across modes. Check that all gtm_*.csv "
-                f"files for this userclass share a consistent set of geom_ids."
+                f"origins or destinations across modes after normalizing geom_ids. "
+                f"This usually means that some gtm_*.csv files were generated on "
+                f"different geometry sets. Check that all modes use the same "
+                f"analysis_areas / geom_id definitions."
             )
 
         # Reindex all matrices to the common O/D set (order and labels now identical)

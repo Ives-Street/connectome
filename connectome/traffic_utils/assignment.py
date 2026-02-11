@@ -270,6 +270,7 @@ def relative_to_absolute_induced_demand(
         scenario_dir,
         G,
         induced_demand_vmt,
+        save=False,
 ):
     # --- Induced demand scaling + speed forecast update ---
     total_relative_demand = 0
@@ -299,49 +300,17 @@ def relative_to_absolute_induced_demand(
             edge_data["post_induction_vol_vph"] = post_induction_vol_vph
 
     # --- Save outputs ---
-    out_dir = f"{scenario_dir}/input_data/traffic/"
-    logger.info("relative_to_absolute_induced_demand: saving updated graph to '%s'", out_dir)
-    os.makedirs(out_dir, exist_ok=True)
-    ox.save_graphml(G, f"{out_dir}/routing_graph.graphml")
-    edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
-    edges.to_file(f"{out_dir}/routing_edges.gpkg", driver="GPKG")
-    logger.info("assign_induced_demand: graph saved successfully in '%s'", out_dir)
+    if save:
+        out_dir = f"{scenario_dir}/input_data/traffic/"
+        logger.info("relative_to_absolute_induced_demand: saving updated graph to '%s'", out_dir)
+        os.makedirs(out_dir, exist_ok=True)
+        ox.save_graphml(G, f"{out_dir}/routing_graph.graphml")
+        edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
+        edges.to_file(f"{out_dir}/routing_edges.gpkg", driver="GPKG")
+        logger.info("assign_induced_demand: graph saved successfully in '%s'", out_dir)
 
-
-    # TODO move this stats report to recalculate_speeds
-    # Generate statistics report
-    stats_columns = ['induced_volume', 'forecast_speed_change_percent',
-                     'scenario_delay_veh_sec', 'scenario_delay_veh_min']
-
-    stats_output = []
-    for col in stats_columns:
-        if col in edges.columns:
-            data = edges[col].dropna()
-            if not data.empty:
-                col_stats = {
-                    'metric': col,
-                    'mean': data.mean(),
-                    'median': data.median(),
-                    'std': data.std(),
-                    'min': data.min(),
-                    'max': data.max(),
-                    'count': len(data)
-                }
-                stats_output.append(col_stats)
-
-    # Write statistics to file
-    stats_path = os.path.join(out_dir, 'traffic_statistics.txt')
-    with open(stats_path, 'w') as f:
-        f.write("Traffic Statistics Summary\n")
-        f.write("========================\n\n")
-        for stat in stats_output:
-            f.write(f"{stat['metric']}:\n")
-            f.write(f"  Count: {stat['count']:.0f}\n")
-            f.write(f"  Mean: {stat['mean']:.2f}\n")
-            f.write(f"  Median: {stat['median']:.2f}\n")
-            f.write(f"  Std Dev: {stat['std']:.2f}\n")
-            f.write(f"  Min: {stat['min']:.2f}\n")
-            f.write(f"  Max: {stat['max']:.2f}\n\n")
+        # Generate traffic statistics
+        save_traffic_stats(G, scenario_dir)
 
     return G
 
@@ -401,7 +370,77 @@ def recalculate_speeds(G):
         edge_data["scenario_delay_veh_sec"] = scenario_delay_veh_sec
         edge_data["scenario_delay_veh_min"] = scenario_delay_veh_min
 
+        edge_data["v_c_ratio"] = post_induction_vol_vph / capacity
+
     return G
+
+def save_traffic_stats(G, scenario_dir, out_subdir="input_data/traffic"):
+    """
+    Save routing_graph.gpkg and routing_graph.graphml,
+    Save key road network statistics in both human and machine readable formats.
+    """
+    logger.info("saving traffic graphml, gpkg, and statistics")
+    out_dir = f"{scenario_dir}/{out_subdir}/"
+
+    edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
+
+    edges['scenario_delay_veh_min_per_mile'] = edges['scenario_delay_veh_min'] / (edges['length'] / 1609)
+    edges['scenario_delay_veh_hr_per_mile'] = edges['scenario_delay_veh_min_per_mile'] / 60
+
+    edges['induced_vmt'] = edges['induced_volume'] * (edges['length'] / 1609)
+
+    # Calculate statistics for key metrics
+    stats = {}
+    metrics = [
+        'length', 'modeled_vol_vph', 'capacity_vph', 'ff_speed_kph',
+        'peak_speed_kph', 'forecast_speed_kph', 'v_c_ratio',
+        'induced_volume', 'forecast_speed_change_percent',
+        'scenario_delay_veh_sec', 'scenario_delay_veh_min',
+        'induced_vmt'
+    ]
+
+
+    edges['sc_delay_veh_min_per_mile'] = edges['scenario_delay_veh_min'] / (edges['length'] / 1609)
+    import pdb; pdb.set_trace()
+
+    for metric in metrics:
+        if metric in edges.columns:
+            data = edges[metric].dropna().astype(float)
+            if not data.empty:
+                stats[metric] = {
+                    'count': len(data),
+                    'mean': float(data.mean()),
+                    'median': float(data.median()),
+                    'std': float(data.std()),
+                    'min': float(data.min()),
+                    'max': float(data.max()),
+                    'sum': float(data.sum()),
+                }
+
+    os.makedirs(f"{scenario_dir}/{out_subdir}/", exist_ok=True)
+
+    # Save machine-readable JSON
+    with open(f"{out_dir}/traffic_statistics.json", 'w') as f:
+        json.dump(stats, f, indent=2)
+
+    # Save human-readable text summary
+    with open(f"{out_dir}/traffic_statistics.txt", 'w') as f:
+        f.write("Traffic Network Statistics Summary\n")
+        f.write("================================\n\n")
+        for metric, values in stats.items():
+            f.write(f"{metric}:\n")
+            f.write(f"  Count: {values['count']:,.0f}\n")
+            f.write(f"  Mean: {values['mean']:,.2f}\n")
+            f.write(f"  Median: {values['median']:,.2f}\n")
+            f.write(f"  Std Dev: {values['std']:,.2f}\n")
+            f.write(f"  Min: {values['min']:,.2f}\n")
+            f.write(f"  Max: {values['max']:,.2f}\n")
+            f.write(f"  Sum: {values['sum']:,.2f}\n\n")
+
+    logger.info("saving modified road graph")
+    ox.save_graphml(G, f"{scenario_dir}/{out_subdir}/routing_graph.graphml")
+    edges.to_file(f"{scenario_dir}/{out_subdir}/routing_edges.gpkg", driver="GPKG")
+
 
 #this was the old function
 def assign_induced_demand_handwritten(scenario_dir,

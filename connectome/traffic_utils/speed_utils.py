@@ -295,6 +295,22 @@ class MatchConfig:
     allow_many_to_one: bool = True
     max_matches_per_edge: int = 4
 
+def remove_isolated_and_orphan_components(G: nx.MultiDiGraph) -> nx.MultiDiGraph:
+    """
+    Clean a routing graph by:
+      1) Removing degree-0 nodes (true isolates).
+      2) Keeping only the largest weakly connected component.
+
+    This prevents rep_points from snapping onto tiny fragments or
+    completely isolated nodes that cannot reach the main network.
+    """
+
+    # If anything remains, keep only the largest weakly connected component
+    if not nx.is_empty(G):
+        largest = max(nx.weakly_connected_components(G), key=len)
+        G = G.subgraph(largest).copy()
+
+    return G
 
 # ---------------------------------------------------------------------------
 # Load & flatten TomTom data
@@ -611,11 +627,9 @@ def get_osm_graph(
     logger.info("Loading filtered OSM graph from '%s'", filtered_osm_filepath)
     G = ox.graph_from_xml(filtered_osm_filepath, retain_all=True)
 
-    # Prune isolated nodes (degree 0) conservatively
-    isolated_nodes = [n for n, deg in G.degree() if deg == 0]
-    if isolated_nodes:
-        logger.info("Removing %d isolated nodes after filtering", len(isolated_nodes))
-        G.remove_nodes_from(isolated_nodes)
+    # Prune isolates (degree 0) aggressively
+    # TODO add this as a configurable parameter - some cities may actually have islands.
+    G = remove_isolated_and_orphan_components(G)
 
     logger.info(
         "Resulting drivable graph: %d nodes, %d edges",

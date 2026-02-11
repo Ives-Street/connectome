@@ -103,9 +103,28 @@
     "I 25 EXPR": 0.96
   },
 
+  "toll_exemptions": {
+    "description": "List of geom_ids to be exempted from tolls on the road with the given ref",
+    "exemptions": {
+      "I270_HCNWA": [
+        141,
+        755,
+        585,
+        147,
+        1092,
+        757
+      ]
+    }
+  },
+
   "custom_capacities": {
     "description": "hard-wired capacities for specific roadways by OSM reference (not per lane, total)" ,
     "I 270": 3000
+  },
+
+  "custom_capacities_perlane": {
+    "description": "hard-wired capacities for specific roadways by OSM reference (not per lane, total)" ,
+    "improved_lanes": 1600
   },
 
   "value_of_travel_time": {

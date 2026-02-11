@@ -24,9 +24,17 @@ from traffic_utils.volume_utils import match_tmas_stations_to_graph
 
 from connectome.traffic_utils.volume_utils import infer_volume
 
-_api_keys_dir = Path(__file__).resolve().parent.parent / "api_keys"
-os.environ['MOBILITY_API_REFRESH_TOKEN'] = (_api_keys_dir / "mobility_db_refresh_token.txt").read_text().rstrip("\n")
-os.environ['MAPBOX_TOKEN'] = (_api_keys_dir / "mapbox_token.txt").read_text().rstrip("\n")
+try:
+    _api_keys_dir = Path(__file__).resolve().parent.parent / "api_keys"
+    os.environ['MOBILITY_API_REFRESH_TOKEN'] = (_api_keys_dir / "mobility_db_refresh_token.txt").read_text().rstrip("\n")
+except FileNotFoundError:
+    raise FileNotFoundError("Mobility Database API key file not found")
+
+try:
+    os.environ['MAPBOX_TOKEN'] = (_api_keys_dir / "mapbox_token.txt").read_text().rstrip("\n")
+except FileNotFoundError:
+    print("Mapbox API token not found. Mapbox features unavailable")
+    os.environ['MAPBOX_TOKEN'] = None
 
 def download_osm(geometry: gpd.GeoDataFrame, #unbuffered
                 save_to_unclipped: str,

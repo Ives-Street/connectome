@@ -8,6 +8,8 @@ Connectome measures general access-to-destinations in urban areas across all mod
 
 This repo serves both as the development codebase and as the tool used to run analyses for clients. There is no separation between the two — client work frequently drives code enhancements.
 
+This repo is NOT DEPLOYABLE / SHIPPABLE CODE. It is currently intended only for internal use by Ives Street to do client work while we develop the software into a tool we can eventually licence to users. It is most important to prioritize good functioning, maintainability, and performance. Opportunities to make it more user-friendly are valuable, but a lower priority.
+
 ## Environment
 
 Conda environment is `cxome`. Java 21 must be available at runtime for r5py (multi-modal routing engine). Full install instructions are in README.md. No formal test suite — testing is done by running scenarios through `scenario_management.py` functions.
@@ -91,6 +93,7 @@ For detailed file listings per scenario stage, see `docs/scenario_files.md`.
 ## Communication
 
 When a message ends with `!N` (e.g. `!50`), target roughly N words in the response. Flex up or down if it genuinely helps.
+If an important question arises while you are thinking, do not hesitate to interrupt and ask the user.
 
 ## Sensitive Files
 
