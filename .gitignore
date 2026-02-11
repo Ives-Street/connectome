@@ -150,3 +150,4 @@ dmypy.json
 # api tokens
 mobility_db_refresh_token.txt
 mapbox_token.txt
+census_api_key.txt

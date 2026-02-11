@@ -101,9 +101,10 @@ def _exempt_set_suffix(exempt_set: Set[str]) -> str:
 
 def get_acs_data_for_tracts(tracts: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     print("getting ACS data for tracts")
-    census_api_key = os.environ.get("CENSUS_API_KEY")
-    if not census_api_key:
-        raise ValueError("CENSUS_API_KEY environment variable not set. Get a key at https://api.census.gov/data/key_signup.html")
+    try:
+        census_api_key = open("census_api_key.txt").read().rstrip("\n")
+    except FileNotFoundError:
+        raise FileNotFoundError("census_api_key.txt not found. Get a key at https://api.census.gov/data/key_signup.html")
     c = Census(census_api_key)
     acs_variable_names = list(acs_variables.keys())
     
