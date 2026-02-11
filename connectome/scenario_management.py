@@ -2,11 +2,13 @@ import os
 import shutil
 import geopandas as gpd
 import pandas as pd
-from shapely.geometry import Point
 import logging
+import json
 
 from tqdm import tqdm
 import osmnx as ox
+from shapely.geometry import Point, Polygon
+from pathlib import Path
 
 
 #assume we're running this from connectome/connectome/
@@ -35,13 +37,22 @@ from setup.define_valuations import generalize_destination_units
 from routing_and_impedance import route_for_all_envs
 from representation import apply_experience_defintions
 from evaluation import evaluate_scenario
-from traffic_utils.assignment import recalculate_speeds, relative_to_absolute_induced_demand
+from traffic_utils.assignment import recalculate_speeds, relative_to_absolute_induced_demand, save_traffic_stats
 from traffic_utils.volume_utils import add_and_calibrate_volume_attributes
 from traffic_utils.speed_utils import compute_bearing
 
 import communication
 
 logger = logging.getLogger(__name__)
+
+TRAFFIC_PARAMS_PATH = Path(__file__).parent / "traffic_utils" / "traffic_analysis_parameters.json"
+
+def load_traffic_params(path: str | Path = TRAFFIC_PARAMS_PATH):
+    """Load traffic analysis parameters (functional classes + clamps)."""
+    path = Path(path)
+    with path.open("r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    return cfg
 
 def run_scenario(scenario_dir,
                  track_volumes: bool | dict = False):
@@ -95,15 +106,17 @@ def run_scenario(scenario_dir,
                           analysis_areas,
                           add_relative_for_induced_demand = bool(track_volumes)
                           )
+
+    else:
+        logger.info("scenario has already been run")
     if not os.path.exists(f"{scenario_dir}/results/geometry_results.html"):
         communication.make_radio_choropleth_map(
             scenario_dir=scenario_dir,
             in_data="results/geometry_results.gpkg",
             outfile="results/geometry_results.html"
         )
-
     else:
-        logger.info("scenario has already been run")
+        logger.info("visualization has already been run")
 
 
 
@@ -148,8 +161,8 @@ def initialize_existing_conditions(scenario_dir,
                 save_to = f"{input_dir}/census/census_tracts.gpkg",
                 address=address,
             )
-        if (lat is not None) and (lon is not None):
-            logger.info(f"fetching census tracts from {address} with buffer {buffer}m")
+        elif (lat is not None) and (lon is not None):
+            logger.info(f"fetching census tracts from ({lat}, {lon}) with buffer {buffer}m")
             census_tracts = get_usa_tracts_from_location(
                 states=states,
                 buffer=buffer,
@@ -166,9 +179,8 @@ def initialize_existing_conditions(scenario_dir,
             )
         else:
             logger.info(f"fetching census tracts from {states} at the state level")
-
             census_tracts = get_usa_tracts_from_state(
-                states=['RI'],
+                states=states,
                 save_to = f"{input_dir}/census/census_tracts.gpkg"
             )
     else:
@@ -274,8 +286,15 @@ def bearings_aligned(b1, b2, margin_deg):
     diff = abs((b1 - b2 + 180) % 360 - 180)
     return diff <= margin_deg
 
+def nodes_within_polygon(G,u_id,v_id,polygon):
+    u = Point(G.nodes[u_id]['x'], G.nodes[u_id]['y'])
+    v = Point(G.nodes[v_id]['x'], G.nodes[v_id]['y'])
+    return polygon.contains(u) and polygon.contains(v)
+
 def redistribute_traffic_hncw(G, fraction_to_redistribute = 0.8):
     #TODO make this run fast if I care later
+
+    capacity_factor = 0.9
 
     i270_target_bearing = 135
     i70_target_bearing = 90
@@ -292,46 +311,97 @@ def redistribute_traffic_hncw(G, fraction_to_redistribute = 0.8):
             if bearings_aligned(data.get('bearing'), i270_target_bearing, 90):
                 capacity = float(data.get('capacity_vph'))
                 volume = float(data.get('post_induction_vol_vph'))
-                if volume > capacity:
-                    total_to_redistribute = max(total_to_redistribute, volume - capacity)
-                import pdb; pdb.set_trace()
+                if volume > (capacity*capacity_factor):
+                    total_to_redistribute = max(total_to_redistribute, volume - (capacity*capacity_factor))
 
     total_to_remove = total_to_redistribute
     total_to_add = total_to_redistribute * fraction_to_redistribute
-    assert total_to_redistribute > 0, "no vehicles to redistribute"
+
+    try:
+        assert total_to_redistribute > 0, "no vehicles to redistribute"
+    except AssertionError:
+        import pdb; pdb.set_trace()
+
+    redist_area_bounds = [
+        (-104.99001, 39.77860),
+        (-104.87193, 39.77468),
+        (-104.87094, 39.83383),
+        (-104.98368, 39.82842),
+        (-104.99001, 39.77860),
+        ]
+
+    redist_area_geom = Polygon(redist_area_bounds)
+
+    alt_route_osmids = {
+        627902176, 627902175,
+        627902174,
+        605513707,
+        628056983,
+        605513700, 605513701, 16966246, 35306825, 521695385, 1342037754,
+        427814288, 903407217, 37356331, 427814287,
+        37356330, 177242477, 16966214,
+        35883125,
+        1341994240, 1341994241, 628376843, 35883125,
+        1340514008, 628376844,
+        88175761, 35883146,
+        307640401, 307640402, 35797660, 24817799,
+        88471266, 88471267, 88471268, 35882293,
+        628433089,
+        88471337, 88471274,
+        1342042682, 49230950,
+        628433096,
+        628433120, 1079584167, 967150904, 967150906, 967150908,
+        1413223021, 1395930286,
+        967150912, 967150915, 1079584168, 1079584170, 1079584172, 1079584174, 1395930287, 967150911,
+        1079608805, 1079608806, 1341992840, 1079608811, 1079608812, 1079608816, 1079608817, 1161301363, 1038603231,
+        1111534208, 967150903, 1078079865, 1078079866, 1078079867, 1078079868, 967150909, 967150910,
+        1341998770, 24851315, 24851316, 955926647,
+        967781611,
+        1078082908, 24873383,
+        1132446921,
+        24873384, 24873491, 24873492,
+        860521539, 89177389, 89177390, 24874518, 24874519,
+        628728355, 24874214, 24874215,
+        800506261, 800506262, 372294119,
+    }
 
     logger.info("redistributing traffic")
+    links_redistributed = 0
     for u, v, k, data in tqdm(list(G.edges(keys=True, data=True))):
         if "I270_HCNWA" in data.get('ref', ""):
             if bearings_aligned(data.get('bearing'), i270_target_bearing, 90):
-                current_volume = float(data.get('post_induction_vol_vph'))
-                new_volume = current_volume - total_to_remove
-                data['post_induction_vol_vph'] = new_volume
-                data['redistributed_vol'] = total_to_remove * -1
-        if "I 25" in str(data.get('ref', "")):
-            if bearings_aligned(data.get('bearing'), i25_target_bearing, 90):
-                current_volume = float(data.get('post_induction_vol_vph'))
-                new_volume = current_volume + total_to_add
-                data['post_induction_vol_vph'] = new_volume
-                data['redistributed_vol'] = total_to_add
-        if "I 70" in str(data.get('ref', "")):
-            if bearings_aligned(data.get('bearing'), i25_target_bearing, 90):
-                current_volume = float(data.get('post_induction_vol_vph'))
-                new_volume = current_volume + total_to_add
-                data['post_induction_vol_vph'] = new_volume
-                data['redistributed_vol'] = total_to_add
+                if nodes_within_polygon(G,u,v,redist_area_geom):
+                    current_volume = float(data.get('post_induction_vol_vph'))
+                    new_volume = current_volume - total_to_remove
+                    data['post_induction_vol_vph'] = new_volume
+                    data['redistributed_vol'] = total_to_remove * -1
+                    links_redistributed += 1
+        try:
+            link_osmids = set(data['osmid'])
+        except TypeError:
+            link_osmids = {data['osmid']}
+        if bool(link_osmids & alt_route_osmids):
+            current_volume = float(data.get('post_induction_vol_vph'))
+            new_volume = current_volume + total_to_add
+            data['post_induction_vol_vph'] = new_volume
+            data['redistributed_vol'] = total_to_add
+            links_redistributed += 1
 
+    logger.info(f"redistributed traffic on {links_redistributed} links")
     return G
 
 # TODO generalize to 'create widening scenario'?
 def create_denver_cdot_scenario(
         scenario_dir,
         new_scenario_dir,
-        induced_demand_annual_vmt = 100000000,
+        induced_demand_annual_vmt = 104000000,
 ):
-    daily_induced_demand_vmt = induced_demand_annual_vmt / 260  # TODO add this to params
+    params = load_traffic_params()
+
+    daily_induced_demand_vmt = induced_demand_annual_vmt / 252  # TODO add this to params
     K_factor = 0.12  # TODO add this to params
     peak_hour_induced_demand_vmt = daily_induced_demand_vmt * K_factor
+    improved_lane_capacity_per_lane = params['custom_capacities_perlane']['improved_lanes']
 
     if os.path.exists(f"{new_scenario_dir}/input_data/traffic/routing_graph.graphml"):
         logger.info("scenario already exists, skipping")
@@ -360,7 +430,7 @@ def create_denver_cdot_scenario(
                 lanes = float(data.get('lanes'))
                 capacity = float(data.get('capacity_vph'))
 
-                new_capacity_per_lane = 1900 #TODO add this to traffic_params? or some other params?
+                new_capacity_per_lane = improved_lane_capacity_per_lane
 
                 try:
                     link_osmids = set(data['osmid'])
@@ -384,17 +454,12 @@ def create_denver_cdot_scenario(
             import pdb
             pdb.set_trace()
 
-        G = relative_to_absolute_induced_demand(new_scenario_dir, G, peak_hour_induced_demand_vmt)
+        G = relative_to_absolute_induced_demand(new_scenario_dir, G, peak_hour_induced_demand_vmt, save=False)
 
         G = recalculate_speeds(G)
 
         # Save modified graph
-        logger.info("saving modified road graph")
-        G.graph['has_toll'] = True
-        os.makedirs(f"{new_scenario_dir}/input_data/traffic", exist_ok=True)
-        ox.save_graphml(G, f"{new_scenario_dir}/input_data/traffic/routing_graph.graphml")
-        edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
-        edges.to_file(f"{new_scenario_dir}/input_data/traffic/routing_edges.gpkg", driver="GPKG")
+        save_traffic_stats(G, new_scenario_dir)
 
     logger.info("copying ttms")
     copy_ttms(scenario_dir, new_scenario_dir, modes_to_copy = ['WALK',"BICYCLE","TRANSIT"])
@@ -404,14 +469,17 @@ def create_denver_hcnw_scenario(
         new_scenario_dir,
         induced_demand_annual_vmt = 22000000,
 ):
+    params = load_traffic_params()
+
     daily_induced_demand_vmt = induced_demand_annual_vmt / 260  # TODO add this to params
     K_factor = 0.12  # TODO add this to params
     peak_hour_induced_demand_vmt = daily_induced_demand_vmt * K_factor
+    improved_lane_capacity_per_lane = params['custom_capacities_perlane']['improved_lanes']
 
     if os.path.exists(f"{new_scenario_dir}/input_data/traffic/routing_graph.graphml"):
         logger.info("scenario already exists, skipping")
     else:
-        logger.info("creating denver cdot scenario")
+        logger.info("creating denver hcnw scenario")
         os.makedirs(f"{new_scenario_dir}/input_data/", exist_ok=True)
         for file in ['analysis_areas.gpkg', 'userclass_statistics.csv', 'user_classes.csv','osm_study_area.pbf']:
             shutil.copyfile(f"{scenario_dir}/input_data/{file}", f"{new_scenario_dir}/input_data/{file}")
@@ -435,7 +503,7 @@ def create_denver_hcnw_scenario(
                 lanes = float(data.get('lanes'))
                 capacity = float(data.get('capacity_vph'))
 
-                new_capacity_per_lane = 1900 #TODO add this to traffic_params? or some other params?
+                new_capacity_per_lane = improved_lane_capacity_per_lane + 200
 
                 try:
                     link_osmids = set(data['osmid'])
@@ -467,12 +535,7 @@ def create_denver_hcnw_scenario(
         G = recalculate_speeds(G)
 
         # Save modified graph
-        logger.info("saving modified road graph")
-        G.graph['has_toll'] = True
-        os.makedirs(f"{new_scenario_dir}/input_data/traffic", exist_ok=True)
-        ox.save_graphml(G, f"{new_scenario_dir}/input_data/traffic/routing_graph.graphml")
-        edges = ox.graph_to_gdfs(G, nodes=False, edges=True)
-        edges.to_file(f"{new_scenario_dir}/input_data/traffic/scenario_edges.gpkg", driver="GPKG")
+        save_traffic_stats(G, new_scenario_dir)
 
     logger.info("copying ttms")
     copy_ttms(scenario_dir, new_scenario_dir, modes_to_copy = ['WALK',"BICYCLE","TRANSIT"])
@@ -480,31 +543,81 @@ def create_denver_hcnw_scenario(
 def compared_prepare_results(scenario_dir):
     #relies on scenarios and comparison with EC having been run
     comparison_results = gpd.read_file(f"{scenario_dir}/comparison/geometry_comparison.gpkg")
-    traffic_edges = gpd.read_file(f"{scenario_dir}/input_data/traffic/scenario_edges.gpkg")
+    traffic_edges = gpd.read_file(f"{scenario_dir}/input_data/traffic/routing_edges.gpkg")
 
     save_cols_as_numeric = ['ff_speed_kph', 'obs_speed_kph', 'tomtom_sample_size',
                             'tomtom_night_speed_kph', 'tomtom_sample_size_night', 'peak_speed_kph', 'modeled_vol_vph',
                             'forecast_speed_kph', "peak_traversal_time_sec", 'post_induction_vol_vph',
+                            'scenario_delay_veh_min',
                             'calibration_factor', 'relative_demand', 'induced_volume', 'speed_diff_percent',
                             'previous_peak_speed_kph', 'previous_traversal_time']
 
     for col in save_cols_as_numeric:
         traffic_edges[col] = traffic_edges[col].astype(float)
 
+    traffic_edges['sc_delay_veh_min_per_mile'] = traffic_edges['scenario_delay_veh_min'] / (traffic_edges['length'] / 1609)
+
+    out_dir = f"{scenario_dir}/prepared_results/"
+
+    stats = {}
+    metrics = [
+        'length', 'modeled_vol_vph', 'capacity_vph', 'ff_speed_kph',
+        'peak_speed_kph', 'forecast_speed_kph', 'v_c_ratio',
+        'induced_volume', 'forecast_speed_change_percent',
+        'scenario_delay_veh_sec', 'scenario_delay_veh_min',
+        'induced_vmt', 'sc_delay_veh_min_per_mile'
+    ]
+
+    for metric in metrics:
+        if metric in traffic_edges.columns:
+            data = traffic_edges[metric].dropna().astype(float)
+            if not data.empty:
+                stats[metric] = {
+                    'count': len(data),
+                    'mean': float(data.mean()),
+                    'median': float(data.median()),
+                    'std': float(data.std()),
+                    'min': float(data.min()),
+                    'max': float(data.max()),
+                    'sum': float(data.sum()),
+                }
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Save machine-readable JSON
+    with open(f"{out_dir}/traffic_statistics.json", 'w') as f:
+        json.dump(stats, f, indent=2)
+
+    # Save human-readable text summary
+    with open(f"{out_dir}/traffic_statistics.txt", 'w') as f:
+        f.write("Traffic Network Statistics Summary\n")
+        f.write("================================\n\n")
+        for metric, values in stats.items():
+            f.write(f"{metric}:\n")
+            f.write(f"  Count: {values['count']:,.0f}\n")
+            f.write(f"  Mean: {values['mean']:,.2f}\n")
+            f.write(f"  Median: {values['median']:,.2f}\n")
+            f.write(f"  Std Dev: {values['std']:,.2f}\n")
+            f.write(f"  Min: {values['min']:,.2f}\n")
+            f.write(f"  Max: {values['max']:,.2f}\n")
+            f.write(f"  Sum: {values['sum']:,.2f}\n\n")
     stats = {}
 
-    traffic_edges['scenario_delay_veh_min_per_mile'] = traffic_edges['scenario_delay_veh_min'] / (traffic_edges['length'] / 1609)
-    traffic_edges['scenario_delay_veh_hr_per_mile'] = traffic_edges['scenario_delay_veh_min_per_mile'] / 60
-
-    traffic_edges['induced_vmt'] = traffic_edges['induced_volume'] * (traffic_edges['length'] / 1609)
-    stats['induced_vmt'] = traffic_edges['induced_vmt'].sum()
 
     os.makedirs(f"{scenario_dir}/prepared_results/", exist_ok=True)
-    traffic_edges.to_file(f"{scenario_dir}/prepared_results/scenario_edges.gpkg", driver="GPKG")
+    traffic_edges.to_file(f"{scenario_dir}/prepared_results/routing_edges.gpkg", driver="GPKG")
 
     print(stats)
 
 if __name__ == "__main__":
+    study_name = "denver20"
+    # communication.compare_scenarios(f"testing/{study_name}", "existing_conditions", "cdot_scenario")
+    # compared_prepare_results(f"testing/{study_name}/cdot_scenario/")
+    #
+    # communication.compare_scenarios(f"testing/{study_name}", "existing_conditions", "hcnw_scenario")
+    # compared_prepare_results(f"testing/{study_name}/hcnw_scenario/")
+
+# def hold():
     traffic_datasource = "tomtom"
     volume_datasource = "tmas"
     study_name = "denver20"
@@ -568,7 +681,7 @@ def pl3():
                                 "checkpoint_node_ids": None,
                                 "checkpoint_edge_attr": "ref",
                                 "checkpoint_edge_values": ['I 270']},
-                 induced_demand_annual_vmt = 100000000,)
+                 )
     create_denver_cdot_scenario("testing/minidenver/existing_conditions/", "testing/minidenver/cdot_scenario/")
     run_scenario("testing/minidenver/cdot_scenario/")
     communication.compare_scenarios("testing/minidenver", "existing_conditions", "cdot_scenario")
