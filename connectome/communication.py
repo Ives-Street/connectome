@@ -13,19 +13,13 @@ import folium.plugins
 from shapely.geometry import LineString
 import logging
 
+from constants import MODES
+
 logging.basicConfig(
     level=logging.INFO,              # or DEBUG
     format="%(asctime)s %(levelname)s %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-MODES = [ #todo - make this universal for the whole codebase
-    "CAR",
-    "TRANSIT",
-    "WALK",
-    "BICYCLE",
-    "RIDEHAIL",
-]
 
 
 # ============================================

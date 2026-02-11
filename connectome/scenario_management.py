@@ -3,7 +3,6 @@ import shutil
 import geopandas as gpd
 import pandas as pd
 import logging
-import json
 
 from pathlib import Path
 
@@ -36,17 +35,9 @@ from evaluation import evaluate_scenario
 from traffic_utils.volume_utils import add_and_calibrate_volume_attributes
 
 import communication
+from constants import TRAFFIC_PARAMS_PATH, load_traffic_params
 
 logger = logging.getLogger(__name__)
-
-TRAFFIC_PARAMS_PATH = Path(__file__).parent / "traffic_utils" / "traffic_analysis_parameters.json"
-
-def load_traffic_params(path: str | Path = TRAFFIC_PARAMS_PATH):
-    """Load traffic analysis parameters (functional classes + clamps)."""
-    path = Path(path)
-    with path.open("r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    return cfg
 
 def run_scenario(scenario_dir,
                  track_volumes: bool | dict = False):

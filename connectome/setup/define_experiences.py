@@ -4,43 +4,18 @@ import pandas as pd
 import osmium
 import json
 import osmnx as ox
-from pathlib import Path
 import logging
+from pathlib import Path
+from typing import Any, FrozenSet, Iterable, Set
 
 from tqdm import tqdm
+
+from constants import MODES, TRAFFIC_PARAMS_PATH, _SAFE_FACILITY_RE, load_traffic_params
 
 # Set up module-level logger
 logger = logging.getLogger(__name__)
 
-# Resolve traffic_analysis_parameters.json relative to this file's location,
-# so it works regardless of the current working directory.
-BASE_DIR = Path(__file__).resolve().parents[1]  # .../connectome/connectome
-TRAFFIC_PARAMS_PATH = BASE_DIR / "traffic_utils" / "traffic_analysis_parameters.json"
-
-if not TRAFFIC_PARAMS_PATH.exists():
-    raise FileNotFoundError(
-        f"traffic_analysis_parameters.json not found at expected location: {TRAFFIC_PARAMS_PATH}"
-    )
-
-with open(TRAFFIC_PARAMS_PATH) as f:
-    traffic_params = json.load(f)
-
-
-MODES = [
-    "CAR",
-    "TRANSIT",
-    "WALK",
-    "BICYCLE",
-    #"RIDESHARE",
-    #"SHARED_BICYCLE",
-]
-
-
-### helpers for toll exemption logic (TODO: move to utils file)
-import re
-from typing import Any, FrozenSet, Iterable, Set
-
-_SAFE_FACILITY_RE = re.compile(r"^[A-Za-z0-9_]+$")
+traffic_params = load_traffic_params()
 
 
 def _normalize_ref(ref_val: Any) -> str | None:

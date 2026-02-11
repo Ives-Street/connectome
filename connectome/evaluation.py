@@ -7,15 +7,7 @@ from tqdm import tqdm
 
 import communication
 from traffic_utils.assignment import assign_relative_demand
-
-
-MODES = [ #todo - make this universal for the whole codebase
-    "CAR",
-    "TRANSIT",
-    "WALK",
-    "BICYCLE",
-    "RIDEHAIL",
-]
+from constants import MODES, DECAY_RATE
 
 #def evaluate_scenario(scenario_dir):
 # scenario_dir = "burlington_test/existing_conditions"
@@ -196,7 +188,7 @@ def choose_modes_for_userclasses(scenario_dir,
     return lowest_traveltimes_by_userclass, mode_selections_by_userclass
 
 def value_per_destination_unit(minute_equivalents) -> float:
-    val_per_dest = np.exp(-0.05 * minute_equivalents)
+    val_per_dest = np.exp(-DECAY_RATE * minute_equivalents)
 
     # weight by TOD (will come later)
     return val_per_dest

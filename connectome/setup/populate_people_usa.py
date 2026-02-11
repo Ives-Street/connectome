@@ -14,8 +14,7 @@ from pathlib import Path
 import json
 import logging
 
-#IF I want to add this (rather than hexagon things), i'll include the function in this file.
-#from .OLDpedestriansfirst import make_patches
+from constants import TRAFFIC_PARAMS_PATH, _SAFE_FACILITY_RE, load_traffic_params
 
 logger = logging.getLogger(__name__)
 
@@ -41,20 +40,7 @@ acs_variables = {
 }
 
 
-TRAFFIC_PARAMS_PATH = Path(__file__).parent.parent / "traffic_utils" / "traffic_analysis_parameters.json"
-
-def load_traffic_params(path: str | Path = TRAFFIC_PARAMS_PATH):
-    """Load traffic analysis parameters (functional classes + clamps)."""
-    path = Path(path)
-    with path.open("r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    return cfg
-
-
-import re
 from typing import Dict, List, Set, Tuple
-
-_SAFE_FACILITY_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 #### helper functions for toll exemption userclass logic

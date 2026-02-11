@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import logging
 
-from functools import lru_cache
 from pathlib import Path
 import json
 import math
@@ -51,19 +50,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TRAFFIC_PARAMS_PATH = Path(__file__).with_name("traffic_analysis_parameters.json")
+from constants import TRAFFIC_PARAMS_PATH, load_traffic_params
 
 #minizing list for memory efficiency
 custom_tags = ['access', 'area', 'highway', 'lanes', 'maxspeed', 'name', 'oneway', 'ref', 'service', 'toll', 'bicycle']
 ox.settings.useful_tags_way = custom_tags
-
-@lru_cache()
-def load_traffic_params(path: str | Path = TRAFFIC_PARAMS_PATH) -> Dict[str, Any]:
-    """Load traffic analysis parameters (functional classes + clamps)."""
-    path = Path(path)
-    with path.open("r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    return cfg
 
 
 # ---------------------------------------------------------------------------

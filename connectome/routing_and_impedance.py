@@ -20,16 +20,9 @@ import car_routing
 import communication
 import logging
 
+from constants import MODES
+
 logger = logging.getLogger(__name__)
-
-
-MODES = [ #todo - make this universal for the whole codebase
-    "CAR",
-    "TRANSIT",
-    "WALK",
-    "BICYCLE",
-]
-#
 
 
 DEPARTURE_TIME = datetime.datetime(2026, 1, 21, 8, 0, 0)
