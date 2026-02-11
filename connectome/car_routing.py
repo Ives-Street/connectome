@@ -2,9 +2,8 @@
 
 CAR routing utilities for Connectome.
 
-This module is based on `car_routing_old.py` and preserves the existing `od_matrix_times(...)`
-surface API exactly (signature and behavior), while providing a new surface API for
-checkpoint-aware routing with optional route (edge) dumping.
+Provides the `od_matrix_times(...)` surface API, plus a checkpoint-aware routing API
+with optional route (edge) dumping.
 
 Key behaviors
 -------------
