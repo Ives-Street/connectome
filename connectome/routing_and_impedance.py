@@ -20,7 +20,7 @@ import car_routing
 import communication
 import logging
 
-from constants import MODES
+from constants import MODES, WORKING_HOURS_PER_YEAR, VOT_DIVISOR
 
 logger = logging.getLogger(__name__)
 
@@ -375,15 +375,43 @@ def estimate_ridehailing_impedances(car_ttm, car_tcm):
     return ridehail_ttm, ridehail_tcm
 
 def generalized_impedance(ttm, tcm, user_class_row):
-    gtm = ttm.copy()
+    """Convert a travel-time matrix and travel-cost matrix into a generalized
+    impedance matrix (minutes-equivalent) using the user class's income.
 
-    working_hours_per_year = 2080 #40/wk, 52 wks/yr
+    The conversion works by expressing dollar costs as equivalent minutes of
+    travel time via a value-of-time (VOT) derived from income:
+
+        hourly_wage     = max_income / WORKING_HOURS_PER_YEAR
+        dollars_per_hr  = hourly_wage / VOT_DIVISOR
+        minutes_per_$   = 60 / dollars_per_hr
+        gtm             = ttm + tcm * minutes_per_$
+
+    Parameters
+    ----------
+    ttm : DataFrame
+        Origin-destination travel-time matrix (minutes).
+    tcm : DataFrame
+        Origin-destination travel-cost matrix (dollars).
+    user_class_row : Series or dict
+        Must contain 'max_income' (annual dollars). Must be positive.
+
+    Returns
+    -------
+    DataFrame
+        Generalized impedance matrix (minutes-equivalent).
+    """
     income_per_year = user_class_row['max_income']
-    income_per_hour = income_per_year / working_hours_per_year
-    dollars_per_hour = income_per_hour / 2
+    if not (income_per_year > 0):
+        raise ValueError(
+            f"max_income must be positive, got {income_per_year!r} "
+            f"for user class {user_class_row.get('user_class_id', '?')}"
+        )
+
+    income_per_hour = income_per_year / WORKING_HOURS_PER_YEAR
+    dollars_per_hour = income_per_hour / VOT_DIVISOR
     minutes_per_dollar = 60 / dollars_per_hour
 
-    gtm += tcm * minutes_per_dollar
+    gtm = ttm + tcm * minutes_per_dollar
 
     return gtm
 

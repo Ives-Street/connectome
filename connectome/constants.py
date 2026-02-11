@@ -14,6 +14,10 @@ MODES = [
 # Exponential decay parameter for accessibility value calculation
 DECAY_RATE = 0.05
 
+# Generalized impedance: value-of-time conversion
+WORKING_HOURS_PER_YEAR = 2080  # 40 hrs/wk × 52 wks/yr
+VOT_DIVISOR = 2  # dollars_per_hour = hourly_wage / VOT_DIVISOR (i.e. VOT = 50% of wage)
+
 # Path to traffic analysis parameters JSON
 TRAFFIC_PARAMS_PATH = Path(__file__).parent / "traffic_utils" / "traffic_analysis_parameters.json"
 
