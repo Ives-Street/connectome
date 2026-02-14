@@ -32,7 +32,7 @@ from setup.geography_utils import (
 from setup.populate_destinations import populate_all_dests_USA
 
 from routing_and_impedance import route_for_all_envs
-from representation import apply_experience_defintions
+from representation import apply_experience_definitions
 from evaluation import evaluate_scenario
 from traffic_utils.volume_utils import add_and_calibrate_volume_attributes
 
@@ -70,7 +70,7 @@ def run_scenario(scenario_dir,
     logger.info("=" * 60)
     if not os.path.exists(f"{scenario_dir}/routing/user_classes_with_routeenvs.csv"):
         logger.info(f"defining experiences for {scenario_dir}")
-        user_classes_w_routeenvs = apply_experience_defintions(f"{scenario_dir}/input_data", scenario_dir)
+        user_classes_w_routeenvs = apply_experience_definitions(f"{scenario_dir}/input_data", scenario_dir)
         user_classes_w_routeenvs.index = user_classes_w_routeenvs.user_class_id.values
     else:
         logger.info("loading experiences from disk")
