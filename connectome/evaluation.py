@@ -210,7 +210,7 @@ def evaluate_for_userclasses(
     for userclass in lowest_traveltimes_by_userclass.keys():
         logger.info("summarizing results for %s", userclass)
         lowest_traveltimes = lowest_traveltimes_by_userclass[userclass]
-        values_per_dest = lowest_traveltimes.applymap(lambda x: value_per_destination_unit(x))
+        values_per_dest = np.exp(-DECAY_RATE * lowest_traveltimes)
         values_per_dest_by_userclass[userclass] = values_per_dest
 
         # Multiply each row by the lodes_jobs count for each destination (column)
@@ -224,6 +224,7 @@ def evaluate_for_userclasses(
         value_sum_per_person.values[
             pd.Index(value_sum_per_person.index).get_indexer(value_sum_per_person.columns), range(
                 len(value_sum_per_person.columns))] = 0
+
         value_sum_per_person_by_userclass[userclass] = value_sum_per_person
         pop_by_geom = population_by_geom_and_userclass[userclass]
         value_sum_per_person = value_sum_per_person_by_userclass[userclass]
