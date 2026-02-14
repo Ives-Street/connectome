@@ -1,4 +1,5 @@
 import os
+import sys
 import shutil
 import geopandas as gpd
 import pandas as pd
@@ -6,11 +7,11 @@ import logging
 
 from pathlib import Path
 
-
-#assume we're running this from connectome/connectome/
-#in case we're just in connectome/ :
-if not os.path.exists('setup'):
-    os.chdir('connectome/')
+# Ensure sibling packages (setup/, traffic_utils/, etc.) are importable
+# regardless of which directory the process was launched from.
+_MODULE_DIR = Path(__file__).resolve().parent
+if str(_MODULE_DIR) not in sys.path:
+    sys.path.insert(0, str(_MODULE_DIR))
 
 
 from setup.physical_conditions import physical_conditions
