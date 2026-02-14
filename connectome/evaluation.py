@@ -32,14 +32,6 @@ logger = logging.getLogger(__name__)
 # 5) sum the total utility of the user class
     # broken down by mode
 
-def generalize_cost(user_class, gtm, cost_matrix = None, comfort_matrix = None):
-    if cost_matrix is not None or comfort_matrix is not None:
-        raise ValueError("Cost and comfort matrices are not yet supported.")
-    else:
-        return gtm
-
-
-
 def load_gtm(filename):
     """" Loads a travel time matrix from a CSV file
 
