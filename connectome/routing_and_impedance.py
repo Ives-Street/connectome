@@ -332,6 +332,16 @@ def route_to_gdf_osmnx2(G, route, attrs=None):
 ###
 
 def parking_cost(ttm, geoms_with_dests):
+    """Estimate daily parking cost (dollars) by destination density.
+
+    Args:
+        ttm: Travel-time matrix (minutes). Used only for shape/index.
+        geoms_with_dests: GeoDataFrame with 'lodes_jobs_per_sqkm' and 'geom_id'.
+
+    Returns:
+        DataFrame (dollars) — same shape as *ttm*. Each column (destination)
+        is assigned a flat parking cost based on job density thresholds.
+    """
     tcm = ttm.copy()
     tcm.loc[:,:] = 0
     # PROVIDENCE/RI SPECIFIC
@@ -343,19 +353,36 @@ def parking_cost(ttm, geoms_with_dests):
     high_price_dests = geoms_with_dests[(geoms_with_dests['lodes_jobs_per_sqkm'] >= 12000)]
     high_price_geomids = high_price_dests['geom_id'].values
 
-    tcm.loc[:,mid_price_geomids] = 5 #5 dollars to park for the day in downtown Pawtucket, at Brown, and on Broadway
-    tcm.loc[:,high_price_geomids] = 15 #15 dollars to park for the day in downtown PVD
+    tcm.loc[:,mid_price_geomids] = 5   # $5/day — medium-density areas
+    tcm.loc[:,high_price_geomids] = 15  # $15/day — high-density downtown
 
     return tcm
 
 def transit_cost(ttm):
-    #we assume that transit costs $2.00 per ride
+    """Estimate transit fare (dollars) — flat $2.00 per ride.
+
+    Args:
+        ttm: Travel-time matrix (minutes). Used only for shape/index.
+
+    Returns:
+        DataFrame (dollars) — same shape as *ttm*, all values $2.00.
+    """
     tcm = ttm.copy()
     tcm.loc[:,:] = 2
     return tcm
 
 def car_operating_cost(ttm):
-    #we only count fuel because people don't usually think about maintenance when deciding how to travel
+    """Estimate car fuel cost (dollars) from travel time.
+
+    Uses a rough conversion: $0.15/mile fuel cost * 0.75 miles/minute
+    average speed = ~$0.1125/minute. Does not include maintenance.
+
+    Args:
+        ttm: Travel-time matrix (minutes).
+
+    Returns:
+        DataFrame (dollars) — same shape as *ttm*.
+    """
     fuel_cost_per_mile = 0.15 # https://data.bts.gov/stories/s/Transportation-Economic-Trends-Transportation-Spen/bzt6-t8cd/
     est_miles_per_minute = 0.75 # total guess. TODO: during routing, save the distance matrix as well as time
     operating_cost_per_minute = fuel_cost_per_mile * est_miles_per_minute
@@ -364,11 +391,29 @@ def car_operating_cost(ttm):
     tcm *= operating_cost_per_minute
     return tcm
 
+# Ridehail magic numbers — TODO: move to traffic_analysis_parameters.json
+RIDEHAIL_WAIT_MINUTES = 5     # average wait time for pickup
+RIDEHAIL_BASE_FARE = 8        # base fare ($)
+RIDEHAIL_PER_MINUTE = 0.50    # per-minute charge ($), excludes per-mile
+
 def estimate_ridehailing_impedances(car_ttm, car_tcm):
-    ridehail_ttm = car_ttm + 5 #wait 5 minutes
+    """Estimate ridehail travel time (minutes) and cost (dollars).
+
+    Model: TTM = car_ttm + wait time; TCM = base fare + per-minute charge.
+    Per-mile charges are not yet included (need a distance matrix).
+
+    Args:
+        car_ttm: Car travel-time matrix (minutes).
+        car_tcm: Car travel-cost matrix (dollars). Not used in current
+            calculation but reserved for future extensions.
+
+    Returns:
+        tuple: (ridehail_ttm in minutes, ridehail_tcm in dollars)
+    """
+    ridehail_ttm = car_ttm + RIDEHAIL_WAIT_MINUTES
     ridehail_tcm = car_tcm.copy()
-    ridehail_tcm.loc[:,:] = 8 # meter starts at 8???
-    ridehail_tcm += ridehail_ttm * 0.5 # (50c per minute, not counting per-mile charges. Again, need to save a distance matrix.
+    ridehail_tcm.loc[:,:] = RIDEHAIL_BASE_FARE
+    ridehail_tcm += ridehail_ttm * RIDEHAIL_PER_MINUTE
 
     return ridehail_ttm, ridehail_tcm
 
