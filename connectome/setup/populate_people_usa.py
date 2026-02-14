@@ -481,7 +481,7 @@ def create_userclass_statistics(
                  totalpop_lower_bound, int(userclass_stats.population.sum()), totalpop_upper_bound)
     assert totalpop_lower_bound <= int(userclass_stats.population.sum()) <= totalpop_upper_bound
 
-    if not save_to == False:
+    if save_to:
         userclass_stats.to_csv(save_to)
         #TODO: test below code
 
