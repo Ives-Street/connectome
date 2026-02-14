@@ -968,13 +968,27 @@ def proxy_to_volume_ratio(scenario_dir,
     y = matches['obs_vol_vph']
 
     # Fit OLS without intercept (pure proportionality y = coef * X)
-    model = sm.OLS(y, X).fit()
+    try:
+        model = sm.OLS(y, X).fit()
+    except Exception as e:
+        raise ValueError(
+            f"OLS fitting failed for proxy_to_volume_ratio "
+            f"({len(matches)} data points, input_variable={input_variable!r}): {e}"
+        ) from e
+
+    slope = model.params[input_variable]
+    if not np.isfinite(slope):
+        raise ValueError(
+            f"OLS produced non-finite slope ({slope}) for "
+            f"proxy_to_volume_ratio (n={int(model.nobs)}, "
+            f"input_variable={input_variable!r}). "
+            f"Check for zero-variance or degenerate input data."
+        )
 
     # Create scatter plot
     plt.figure(figsize=(10, 6))
     plt.scatter(X, y, alpha=0.5)
 
-    slope = model.params[input_variable]
     plt.plot(X, X * slope, color='red',
              label=f'Fitted line (slope={slope:.2f})')
     plt.xlabel(input_varaiable_name)
@@ -999,7 +1013,8 @@ def proxy_to_volume_ratio(scenario_dir,
         "rmse": float(np.sqrt(model.mse_resid)),
     }
     stats_out_json_path = f"{scenario_dir}/input_data/traffic/debug/proxy_volume_stats.json"
-    json.dump(stats, open(stats_out_json_path, "w"), indent=2)
+    with open(stats_out_json_path, "w") as f:
+        json.dump(stats, f, indent=2)
 
     return slope
 
