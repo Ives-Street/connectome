@@ -93,12 +93,16 @@ def _filter_invalid_gtfs_for_r5py(gtfs_fullpaths: list[str]) -> list[str]:
         except zipfile.BadZipFile:
             logger.warning("Skipping malformed GTFS zip (BadZipFile): %s", path)
             keep = False
-        except Exception as e:
-            # Don't be overly aggressive: log and keep the feed unless it's clearly bad
-            logger.error(
+        except (KeyError, ValueError, csv.Error) as e:
+            logger.warning(
                 "Error while inspecting GTFS file '%s': %s. Keeping it for now.",
                 path,
                 e,
+            )
+        except Exception:
+            logger.exception(
+                "Unexpected error while inspecting GTFS file '%s'. Keeping it for now.",
+                path,
             )
 
         if keep:
