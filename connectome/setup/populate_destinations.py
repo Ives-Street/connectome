@@ -1,3 +1,5 @@
+import logging
+
 import geopandas as gpd
 import osmnx as ox
 import pandas as pd
@@ -8,6 +10,8 @@ from pandas import DataFrame
 from tqdm import tqdm
 from overturemaps import core
 import PyQt6
+
+logger = logging.getLogger(__name__)
 
 def populate_destinations_overture_places(geographies: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Populate destinations for each geography.
@@ -26,7 +30,7 @@ def populate_destinations_overture_places(geographies: gpd.GeoDataFrame) -> gpd.
     try:
         places_gdf = core.geodataframe("place", bbox)
     except FileNotFoundError:
-        print("ERROR in Overture download: NOT adding overture destinations")
+        logger.error("Overture download failed: NOT adding overture destinations")
         # Return in WGS84
         if geographies.crs != "EPSG:4326":
             return geographies.to_crs("EPSG:4326")
@@ -50,19 +54,60 @@ def populate_destinations_LODES_jobs(geographies: gpd.GeoDataFrame,
                                      states: list[str],
                                      already_tracts=False) -> gpd.GeoDataFrame:
     """Populate LODES job counts for each geography.
-    
+
+    Supports multi-resolution geographies via the ``geo_level`` column.
+    When present, block-level areas are matched by full 15-digit GEOID,
+    block-group areas by 12-digit prefix, and tract areas by 11-digit prefix.
+
     Args:
-        geographies: GeoDataFrame in any CRS
+        geographies: GeoDataFrame in any CRS.  May contain a ``geo_level``
+            column with values ``'tract'``, ``'block_group'``, or ``'block'``.
         states: List of state abbreviations
         already_tracts: Whether geographies are already census tracts
-        
+            (ignored when ``geo_level`` column is present)
+
     Returns:
         GeoDataFrame with lodes_jobs column, in WGS84 (EPSG:4326)
     """
+    from constants import GEOID_LEN
+
     # Ensure WGS84 for consistency
     if geographies.crs != "EPSG:4326":
         geographies = geographies.to_crs("EPSG:4326")
-    
+
+    # --- multi-resolution path --------------------------------------------
+    if 'geo_level' in geographies.columns:
+        # Fetch block-level LODES (finest available) for all states
+        lodes_dfs = []
+        for state in states:
+            lodes_dfs.append(get_lodes(state, year=2022, lodes_type="wac", agg_level="block"))
+        lodes_block = pd.concat(lodes_dfs)
+        lodes_block['w_geocode'] = lodes_block['w_geocode'].astype(str)
+
+        jobs_series = pd.Series(0.0, index=geographies.index)
+
+        for level, prefix_len in GEOID_LEN.items():
+            mask = geographies['geo_level'] == level
+            if not mask.any():
+                continue
+
+            # Aggregate LODES blocks to this level via GEOID prefix
+            lodes_agg = (
+                lodes_block
+                .assign(_key=lodes_block['w_geocode'].str[:prefix_len])
+                .groupby('_key')['C000']
+                .sum()
+            )
+
+            level_geoids = geographies.loc[mask, 'GEOID'].astype(str).str[:prefix_len]
+            jobs_series[mask] = level_geoids.map(lodes_agg).fillna(0).values
+
+        geographies['lodes_jobs'] = jobs_series
+        geographies['lodes_jobs_per_sqkm'] = geographies['lodes_jobs'] / (geographies['area_sqm'] / 1_000_000)
+
+        return geographies
+
+    # --- legacy single-resolution paths -----------------------------------
     if already_tracts:
         # Get LODES data for all states and concatenate
         lodes_dfs = []

@@ -1,5 +1,9 @@
+import logging
+
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 #maybe eventually this will have some fancy means of dynamically generating functions for various pairs
 #for now let's keep it simple
@@ -44,7 +48,7 @@ def generalize_destination_units(geoms_with_dests,
         if dest_type in geoms_with_dests.columns:
             general_dests += geoms_with_dests[dest_type] * freq
         elif warn_missing:
-            print(f"Warning: destination type '{dest_type}' not found in input data")
+            logger.warning(f"destination type '{dest_type}' not found in input data")
 
     geoms_with_dests['general_destinations'] = general_dests
     return geoms_with_dests

@@ -44,10 +44,6 @@ import shapely
 from tqdm import tqdm
 from difflib import SequenceMatcher
 
-logging.basicConfig(
-    level=logging.INFO,              # or DEBUG
-    format="%(asctime)s %(levelname)s %(message)s"
-)
 logger = logging.getLogger(__name__)
 
 from constants import TRAFFIC_PARAMS_PATH, load_traffic_params
@@ -995,13 +991,10 @@ def _parse_lanes(val: Union[str, int, float, None],
             try:
                 nums.append(float(p))
             except ValueError:
-                import pdb; pdb.set_trace()
                 continue
         if not nums:
             return None
         if how == "min":
-            if len(nums) > 1:
-                import pdb; pdb.set_trace()
             return int(round(min(nums)))
         if how == "max":
             return int(round(max(nums)))
@@ -1009,7 +1002,6 @@ def _parse_lanes(val: Union[str, int, float, None],
             raise ValueError(f"Invalid how={how!r}")
     except Exception as e:
         logger.debug(f"Could not parse lanes='{val}': {e}")
-        import pdb; pdb.set_trace()
         return None
 
 

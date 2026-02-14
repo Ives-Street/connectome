@@ -434,7 +434,7 @@ def interpolate_tracts_to_tazs(
         )
 
     # For consistency with the tract-level schema, we want the output column
-    # still to be called 'geom_id' if taz_id_col is something else.
+    # still to be called 'geom_id' if taz_id_col is something else./
     if taz_id_col != "geom_id":
         interpolated = interpolated.rename(columns={taz_id_col: "geom_id"})
 
@@ -484,7 +484,7 @@ def calculate_population_per_sqkm(input_dir: str, save_file: bool = True):
         analysis_areas["area_sqm"] = analysis_areas_proj.geometry.area
 
     if "population_per_sqkm" not in analysis_areas.columns:
-        print("calculating population per sqkm")
+        logger.info("calculating population per sqkm")
 
         userclass_statistics = pd.read_csv(f"{input_dir}/userclass_statistics.csv")
 

@@ -15,10 +15,6 @@ import logging
 
 from constants import MODES
 
-logging.basicConfig(
-    level=logging.INFO,              # or DEBUG
-    format="%(asctime)s %(levelname)s %(message)s"
-)
 logger = logging.getLogger(__name__)
 
 
@@ -27,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ============================================
 
 def save_map_safely(m, out_path: str):
-    print("saving map safely to", out_path)
+    logger.info("saving map safely to %s", out_path)
     html = m.get_root().render()
     # Remove any leading dot(s) accidentally inserted before an object literal
     # Example broken: "..., crs: L.CRS.EPSG3857, ..{ \"zoom\": 12 }"
@@ -218,7 +214,7 @@ def make_radio_choropleth_map(
         numeric_columns = [c for c in columns_to_viz if c in auto_numeric]
 
     if not numeric_columns:
-        print("No numeric columns available to visualize after coercion. Defaulting to all columns.")
+        logger.warning("No numeric columns available to visualize after coercion. Defaulting to all columns.")
         #TODO fix error with determining these columns AFTER renaming columns above
         numeric_columns = auto_numeric
 
@@ -575,9 +571,7 @@ def visualize_access_to_zone(scenario_dir,
         tooltip_precision=0,
     )
 
-    print(
-        f"Saved visualization of access to zone {target_zone_id} to {outpath}"
-    )
+    logger.info(f"Saved visualization of access to zone {target_zone_id} to {outpath}")
 
 
 
@@ -840,16 +834,16 @@ def compare_scenarios(
         output_dir = os.path.join(scenario2_dir, "comparison")
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"\n{'=' * 60}")
-    print(f"SCENARIO COMPARISON")
-    print(f"Baseline: {scenario1_name}")
-    print(f"Alternative: {scenario2_name}")
-    print(f"{'=' * 60}\n")
+    logger.info("=" * 60)
+    logger.info("SCENARIO COMPARISON")
+    logger.info("Baseline: %s", scenario1_name)
+    logger.info("Alternative: %s", scenario2_name)
+    logger.info("=" * 60)
 
     # ========================================================================
     # Load userclass results
     # ========================================================================
-    print("Loading userclass results...")
+    logger.info("Loading userclass results...")
     uc1 = pd.read_csv(os.path.join(scenario1_dir, "results", "userclass_results.csv"), index_col=0)
     uc2 = pd.read_csv(os.path.join(scenario2_dir, "results", "userclass_results.csv"), index_col=0)
 
@@ -900,23 +894,23 @@ def compare_scenarios(
     per_capita_diff = per_capita_2 - per_capita_1
     per_capita_pct_change = (per_capita_diff / per_capita_1) * 100
 
-    print(f"\n{'=' * 60}")
-    print(f"OVERALL SUMMARY")
-    print(f"{'=' * 60}")
-    print(f"\nTotal Accessibility Value:")
-    print(f"  {scenario1_name}: {total_value_1:,.0f}")
-    print(f"  {scenario2_name}: {total_value_2:,.0f}")
-    print(f"  Difference: {total_value_diff:,.0f} ({total_value_pct_change:+.2f}%)")
+    logger.info("=" * 60)
+    logger.info("OVERALL SUMMARY")
+    logger.info("=" * 60)
+    logger.info("Total Accessibility Value:")
+    logger.info("  %s: %s", scenario1_name, f"{total_value_1:,.0f}")
+    logger.info("  %s: %s", scenario2_name, f"{total_value_2:,.0f}")
+    logger.info("  Difference: %s (%s)", f"{total_value_diff:,.0f}", f"{total_value_pct_change:+.2f}%")
 
-    print(f"\nPer Capita Accessibility:")
-    print(f"  {scenario1_name}: {per_capita_1:,.2f}")
-    print(f"  {scenario2_name}: {per_capita_2:,.2f}")
-    print(f"  Difference: {per_capita_diff:,.2f} ({per_capita_pct_change:+.2f}%)")
+    logger.info("Per Capita Accessibility:")
+    logger.info("  %s: %s", scenario1_name, f"{per_capita_1:,.2f}")
+    logger.info("  %s: %s", scenario2_name, f"{per_capita_2:,.2f}")
+    logger.info("  Difference: %s (%s)", f"{per_capita_diff:,.2f}", f"{per_capita_pct_change:+.2f}%")
 
     # Mode shares
-    print(f"\n{'=' * 60}")
-    print(f"OVERALL MODE SHARES")
-    print(f"{'=' * 60}")
+    logger.info("=" * 60)
+    logger.info("OVERALL MODE SHARES")
+    logger.info("=" * 60)
     for mode in MODES:
         col = f"value_from_{mode}"
         if col in uc1.columns and col in uc2.columns:
@@ -926,16 +920,16 @@ def compare_scenarios(
             mode_share_2 = (mode_value_2 / total_value_2) * 100
             mode_share_diff = mode_share_2 - mode_share_1
 
-            print(f"\n{mode}:")
-            print(f"  {scenario1_name}: {mode_share_1:.2f}%")
-            print(f"  {scenario2_name}: {mode_share_2:.2f}%")
-            print(f"  Difference: {mode_share_diff:+.2f} percentage points")
+            logger.info("%s:", mode)
+            logger.info("  %s: %.2f%%", scenario1_name, mode_share_1)
+            logger.info("  %s: %.2f%%", scenario2_name, mode_share_2)
+            logger.info("  Difference: %+.2f percentage points", mode_share_diff)
 
     # ========================================================================
     # Load geometry results
     # ========================================================================
-    print(f"\n{'=' * 60}")
-    print("Loading geometry results...")
+    logger.info("=" * 60)
+    logger.info("Loading geometry results...")
     geom1 = gpd.read_file(os.path.join(scenario1_dir, "results", "geometry_results.gpkg"))
     geom2 = gpd.read_file(os.path.join(scenario2_dir, "results", "geometry_results.gpkg"))
 
@@ -977,7 +971,7 @@ def compare_scenarios(
     # ========================================================================
     # Create visualization maps
     # ========================================================================
-    print("\nCreating comparison visualizations...")
+    logger.info("Creating comparison visualizations...")
 
     # Map 1: Value changes
     value_cols = [
@@ -1013,23 +1007,23 @@ def compare_scenarios(
     # ========================================================================
     # Print geographic summary
     # ========================================================================
-    print(f"\n{'=' * 60}")
-    print(f"GEOGRAPHIC DISTRIBUTION")
-    print(f"{'=' * 60}")
+    logger.info("=" * 60)
+    logger.info("GEOGRAPHIC DISTRIBUTION")
+    logger.info("=" * 60)
 
     # Areas with biggest gains/losses
     top_gainers = geom_comparison.nlargest(5, "per_capita_pct_change")
     top_losers = geom_comparison.nsmallest(5, "per_capita_pct_change")
 
-    print(f"\nTop 5 areas with largest per-capita gains:")
+    logger.info("Top 5 areas with largest per-capita gains:")
     for idx in top_gainers.index:
         val = top_gainers.loc[idx, "per_capita_pct_change"]
-        print(f"  Zone {idx}: {val:+.2f}%")
+        logger.info("  Zone %s: %+.2f%%", idx, val)
 
-    print(f"\nTop 5 areas with largest per-capita losses:")
+    logger.info("Top 5 areas with largest per-capita losses:")
     for idx in top_losers.index:
         val = top_losers.loc[idx, "per_capita_pct_change"]
-        print(f"  Zone {idx}: {val:+.2f}%")
+        logger.info("  Zone %s: %+.2f%%", idx, val)
 
     # ========================================================================
     # Summary file
@@ -1068,15 +1062,15 @@ def compare_scenarios(
                 f.write(f"  {scenario2_name}: {mode_share_2:.2f}%\n")
                 f.write(f"  Difference: {mode_share_diff:+.2f} percentage points\n")
 
-        print(f"\n{'=' * 60}")
-        print(f"Comparison complete!")
-        print(f"Results saved to: {output_dir}")
-        print(f"  - userclass_comparison.csv")
-        print(f"  - geometry_comparison.gpkg")
-        print(f"  - value_comparison_map.html")
-        print(f"  - mode_share_comparison_map.html")
-        print(f"  - comparison_summary.txt")
-        print(f"{'=' * 60}\n")
+    logger.info("=" * 60)
+    logger.info("Comparison complete!")
+    logger.info("Results saved to: %s", output_dir)
+    logger.info("  - userclass_comparison.csv")
+    logger.info("  - geometry_comparison.gpkg")
+    logger.info("  - value_comparison_map.html")
+    logger.info("  - mode_share_comparison_map.html")
+    logger.info("  - comparison_summary.txt")
+    logger.info("=" * 60)
 
     return uc_comparison, geom_comparison
 

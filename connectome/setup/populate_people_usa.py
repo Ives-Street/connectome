@@ -86,7 +86,7 @@ def _exempt_set_suffix(exempt_set: Set[str]) -> str:
 #### end helpers for toll exemption userclass logic
 
 def get_acs_data_for_tracts(tracts: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    print("getting ACS data for tracts")
+    logger.info("getting ACS data for tracts")
     api_keys_dir = Path(__file__).resolve().parent.parent / "api_keys"
     census_key_path = api_keys_dir / "census_api_key.txt"
     if not census_key_path.exists():
@@ -106,7 +106,7 @@ def get_acs_data_for_tracts(tracts: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         tracts_by_state_county[key].append(idx)
     
     # Make batched API calls per state-county combination
-    print(f"Fetching ACS data for {len(tracts_by_state_county)} state-county combinations")
+    logger.info(f"Fetching ACS data for {len(tracts_by_state_county)} state-county combinations")
     for (state, county), tract_indices in tqdm(tracts_by_state_county.items()):
         # Get all tracts in this county at once
         try:
@@ -138,8 +138,8 @@ def get_acs_data_for_tracts(tracts: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
                     for var_name in acs_variable_names:
                         tracts.loc[idx, var_name] = vals[var_name]
         except Exception as e:
-            print(f"Error fetching data for state {state}, county {county}: {e}")
-            print("Falling back to individual tract calls")
+            logger.warning(f"Error fetching data for state {state}, county {county}: {e}")
+            logger.warning("Falling back to individual tract calls")
             # Fallback to individual calls for this county
             for idx in tract_indices:
                 vals = c.acs5.state_county_tract(
@@ -416,7 +416,7 @@ def create_userclass_statistics(
         for quintile_i in range(1, 6):
             quintile_income = tracts.loc[tract_idx, f'B19081_00{quintile_i}E']
             if quintile_income is None:
-                print("NONEEEEE")
+                logger.debug("quintile_income is None for tract %s, quintile %d", geom_id, quintile_i)
                 continue
             if np.isnan(quintile_income): #the tract is so small that the quintile income is null
                 # default to the middle income bin, rounding down
@@ -428,7 +428,7 @@ def create_userclass_statistics(
                            if x >= quintile_income])
                 income_bin_pops[bin_max] += tract_pop / 5  # divide by 5 because census quintiles
             except ValueError:
-                import pdb; pdb.set_trace()
+                logger.warning("could not assign quintile_income %s to any bin for tract %s", quintile_income, geom_id)
 
         #create subgroups / user classes by nested choices
         #there must be a more elegant way to do this, but this works for now
@@ -472,11 +472,13 @@ def create_userclass_statistics(
     # Create DataFrame once from all accumulated rows
     userclass_stats = pd.DataFrame(userclass_stats_rows)
     
-    print(int(userclass_stats.population.sum()), tracts.B01003_001E.sum())
+    logger.debug("userclass pop sum: %d, tract pop sum: %s",
+                 int(userclass_stats.population.sum()), tracts.B01003_001E.sum())
     tolerance=0.02
     totalpop_lower_bound = (1 - tolerance) * tracts.B01003_001E.sum()
     totalpop_upper_bound = (1 + tolerance) * tracts.B01003_001E.sum()
-    print(totalpop_lower_bound, int(userclass_stats.population.sum()), totalpop_upper_bound)
+    logger.debug("pop bounds: %s <= %d <= %s",
+                 totalpop_lower_bound, int(userclass_stats.population.sum()), totalpop_upper_bound)
     assert totalpop_lower_bound <= int(userclass_stats.population.sum()) <= totalpop_upper_bound
 
     if not save_to == False:
@@ -484,6 +486,104 @@ def create_userclass_statistics(
         #TODO: test below code
 
     return userclass_stats
+
+
+def prorate_userclass_stats(
+    tract_stats: pd.DataFrame,
+    analysis_areas: gpd.GeoDataFrame,
+) -> pd.DataFrame:
+    """Prorate tract-level userclass statistics to sub-tract analysis areas.
+
+    For areas where ``geo_level == 'tract'``, the tract statistics are used
+    directly (re-keyed to the area's ``geom_id``).  For block-group and block
+    areas, each sub-area's share of its parent tract is computed from the
+    ``POP20`` column (decennial census block population) and applied as a
+    weight to the tract statistics.
+
+    Args:
+        tract_stats: DataFrame produced by ``create_userclass_statistics()``
+            keyed on the *tract* ``geom_id`` values.  Must contain at least
+            ``geom_id``, ``population``, and ``user_class_id``.
+        analysis_areas: Multi-resolution GeoDataFrame with columns
+            ``geom_id``, ``geo_level``, ``parent_tract_GEOID``, and ``POP20``
+            (for sub-tract areas).
+
+    Returns:
+        DataFrame in the same schema as *tract_stats*, with rows for every
+        analysis area.
+    """
+    # Build lookup: parent_tract_GEOID → tract geom_id
+    tract_areas = analysis_areas[analysis_areas['geo_level'] == 'tract']
+    tract_geoid_to_geom_id = dict(
+        zip(tract_areas['parent_tract_GEOID'], tract_areas['geom_id'])
+    )
+
+    # --- tract-level rows: just re-key geom_id ----------------------------
+    # tract_stats was keyed by the *old* tract geom_id (from census_tracts.gpkg).
+    # We need to map from parent_tract_GEOID to the *new* sequential geom_id.
+    # The old geom_id in tract_stats corresponds to the tract's original index.
+    # We need a bridge: analysis_areas tracts have both GEOID and new geom_id.
+    tract_rows = []
+    if len(tract_areas) > 0:
+        # Map old tract geom_id → parent_tract_GEOID in the original tract data
+        # But tract_stats.geom_id was the old sequential id from census_tracts.gpkg.
+        # We'll pass old_tract_geom_id_to_GEOID from the caller via a column.
+        #
+        # Simpler approach: tract_stats.geom_id values should match
+        # analysis_areas.geom_id for tract-level rows IF the tracts were freshly
+        # processed.  But with multi-resolution the geom_ids are reassigned.
+        #
+        # The robust approach: caller supplies a mapping.  For now, we key on
+        # parent_tract_GEOID which is GEOID and available in tract_stats when
+        # the caller enriches it.
+        pass  # handled below via parent_tract_GEOID
+
+    # Build mapping: parent_tract_GEOID → total POP20 of sub-areas in that tract
+    sub_areas = analysis_areas[analysis_areas['geo_level'] != 'tract'].copy()
+
+    # Ensure POP20 is numeric
+    if 'POP20' in sub_areas.columns:
+        sub_areas['POP20'] = pd.to_numeric(sub_areas['POP20'], errors='coerce').fillna(0)
+    else:
+        sub_areas['POP20'] = 0
+
+    tract_pop_totals = sub_areas.groupby('parent_tract_GEOID')['POP20'].sum()
+
+    # --- build output rows -------------------------------------------------
+    output_rows = []
+
+    for _, area in analysis_areas.iterrows():
+        geom_id = area['geom_id']
+        parent_geoid = area['parent_tract_GEOID']
+        geo_level = area['geo_level']
+
+        # Get tract-level stats for the parent tract (keyed by GEOID)
+        parent_stats = tract_stats[tract_stats['parent_tract_GEOID'] == parent_geoid]
+
+        if parent_stats.empty:
+            continue
+
+        if geo_level == 'tract':
+            # Copy directly, just update geom_id
+            rows = parent_stats.copy()
+            rows['geom_id'] = geom_id
+            output_rows.append(rows)
+        else:
+            # Prorate by population weight
+            area_pop = float(pd.to_numeric(area.get('POP20', 0), errors='coerce') or 0)
+            total_pop = tract_pop_totals.get(parent_geoid, 0)
+            weight = area_pop / total_pop if total_pop > 0 else 0
+
+            rows = parent_stats.copy()
+            rows['geom_id'] = geom_id
+            rows['population'] = rows['population'] * weight
+            output_rows.append(rows)
+
+    if not output_rows:
+        return pd.DataFrame(columns=tract_stats.columns)
+
+    result = pd.concat(output_rows, ignore_index=True)
+    return result
 
 
 def populate_people_usa(scenario_dir):
@@ -495,21 +595,21 @@ def populate_people_usa(scenario_dir):
     tracts.index = tracts['geom_id'].values
     if not os.path.exists(f"{input_dir}/user_classes.csv"):
         num_income_bins = 4
-        print("establishing user classes")
+        logger.info("establishing user classes")
         user_classes = create_userclasses(
             tracts,
             num_income_bins,
             save_to = f"{input_dir}/user_classes.csv"
         )
     else:
-        print("loading user classes from disk")
+        logger.info("loading user classes from disk")
         user_classes = pd.read_csv(f"{input_dir}/user_classes.csv")
         user_classes.index = user_classes.user_class_id.values
         user_classes.fillna("",inplace=True)
 
 
     if not os.path.exists(f"{input_dir}/userclass_statistics.csv"):
-        print("calculating user class statistics")
+        logger.info("calculating user class statistics")
         userclass_statistics = create_userclass_statistics(
             tracts,
             user_classes,

@@ -165,8 +165,7 @@ def r5py_route_environment(routeenv, mode, scenario_dir, rep_points, departure_t
             gtfs_fullpaths,
             e,
         )
-        print(f"Error loading network for {routeenv}: {e}")
-        print("If this persists, you may need to inspect or regenerate GTFS feeds for this routeenv.")
+        logger.error(f"If this persists, you may need to inspect or regenerate GTFS feeds for routeenv '{routeenv}'.")
         raise
 
     # route on network to create travel time matrix
@@ -184,7 +183,7 @@ def r5py_route_environment(routeenv, mode, scenario_dir, rep_points, departure_t
     if ttm_df.isnull().any().any():
         logger.warning("Travel time matrix for routeenv='%s', mode='%s' contains NaN values",
                        routeenv, mode)
-        print(f"Warning calculating network for {routeenv}: travel time matrix contains empty values")
+        logger.warning(f"travel time matrix for routeenv '{routeenv}' contains empty values")
 
     # Ensure ids are strings for consistent indexing/column matching
     ttm_df["from_id"] = ttm_df["from_id"].astype(str)
@@ -197,8 +196,7 @@ def r5py_route_environment(routeenv, mode, scenario_dir, rep_points, departure_t
 
     if np.isnan(ttm_df_wide.iloc[1,1]):
         logger.error("All values are NaN in TTM for routeenv='%s', mode='%s'", routeenv, mode)
-        print(f"Error calculating network for {routeenv}: all values are nan")
-        print("TRY EMPTYING YOUR CACHE /home/user/.cache/r5py/*")
+        logger.error(f"All values are NaN in TTM for routeenv '{routeenv}'. TRY EMPTYING YOUR CACHE ~/.cache/r5py/*")
         raise ValueError
 
     os.makedirs(f"{scenario_dir}/routing/{routeenv}/raw_ttms/", exist_ok=True)
@@ -232,7 +230,7 @@ def route_for_all_envs(scenario_dir: str,
     # Ensure WGS84 for r5py
     if geoms_with_dests.crs != "EPSG:4326":
         logger.info("Converting geoms_with_dests from %s to EPSG:4326", geoms_with_dests.crs)
-        print(f"Converting geoms_with_dests from {geoms_with_dests.crs} to EPSG:4326")
+        logger.info(f"Converting geoms_with_dests from {geoms_with_dests.crs} to EPSG:4326")
         geoms_with_dests = geoms_with_dests.to_crs("EPSG:4326")
 
     # Create representative points in WGS84
@@ -247,12 +245,12 @@ def route_for_all_envs(scenario_dir: str,
     user_classes.fillna("", inplace=True)
     for mode in MODES:
         logger.info("Identifying routing environments for mode='%s'", mode)
-        print(f"identifying routeenvs for {mode}")
+        logger.info(f"identifying routeenvs for {mode}")
         route_envs_for_mode = set()
         route_envs_for_mode.update(user_classes[f'routeenv_{mode}'].unique())
         route_envs_for_mode.discard("")
         logger.debug("Route environments for mode='%s': %s", mode, route_envs_for_mode)
-        print(f"routeenvs for {mode}: {route_envs_for_mode}")
+        logger.debug(f"routeenvs for {mode}: {route_envs_for_mode}")
         for routeenv in route_envs_for_mode:
             user_class_selection = user_classes[user_classes[f'routeenv_{mode}'] == routeenv]
             logger.debug("Selected %d user classes for mode='%s', routeenv='%s'",
@@ -575,7 +573,7 @@ def traffic_speed_adjustment(scenario_dir, analysis_areas, car_ttm):
 
 def post_process_WALK(scenario_dir, ttm, user_class_selection, geoms_with_dests):
     logger.info("Post-processing WALK impedances for %d userclasses", len(user_class_selection))
-    print("post-processing walk")
+    logger.info("post-processing WALK")
     # we don't yet do anything except save the ttm and empty tcm to each userclass folder
     mode = "WALK"
     tcm = ttm.copy()
@@ -589,7 +587,7 @@ def post_process_WALK(scenario_dir, ttm, user_class_selection, geoms_with_dests)
 
 def post_process_BICYCLE(scenario_dir, ttm, user_class_selection, geoms_with_dests):
     logger.info("Post-processing BICYCLE impedances for %d userclasses", len(user_class_selection))
-    print("post-processing bicycle")
+    logger.info("post-processing BICYCLE")
     # we don't yet do anything except save the ttm and empty tcm to each userclass folder
     mode = "BICYCLE"
     tcm = ttm.copy()
@@ -605,7 +603,7 @@ def post_process_BICYCLE(scenario_dir, ttm, user_class_selection, geoms_with_des
 
 def post_process_TRANSIT(scenario_dir, ttm, user_class_selection, geoms_with_dests):
     logger.info("Post-processing TRANSIT impedances for %d userclasses", len(user_class_selection))
-    print("post-processing transit")
+    logger.info("post-processing TRANSIT")
     mode = "TRANSIT"
     tcm = ttm.copy()
     tcm.loc[:, :] = 0
@@ -620,7 +618,7 @@ def post_process_TRANSIT(scenario_dir, ttm, user_class_selection, geoms_with_des
 
 def post_process_CAR(scenario_dir, ttm, user_class_selection, geoms_with_dests):
     logger.info("Post-processing CAR impedances for %d userclasses", len(user_class_selection))
-    print("post-processing car")
+    logger.info("post-processing CAR")
     mode = "CAR"
     tcm = ttm.copy()
     tcm.loc[:, :] = 0

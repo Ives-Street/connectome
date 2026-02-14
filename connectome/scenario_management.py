@@ -20,6 +20,8 @@ from setup.census_geometry_usa import (
     get_usa_tracts_from_location,
     get_usa_tracts_from_state,
     get_usa_tracts_from_polygon,
+    get_multi_resolution_geometries,
+    resolve_center_geom,
 )
 
 from setup.geography_utils import (
@@ -36,6 +38,7 @@ from traffic_utils.volume_utils import add_and_calibrate_volume_attributes
 
 import communication
 from constants import TRAFFIC_PARAMS_PATH, load_traffic_params
+from logging_config import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +60,14 @@ def run_scenario(scenario_dir,
                 This will be used when allocating induced demand from highway widenings.
 
     """
-    logger.info(f"loading experiences for {scenario_dir}")
+    configure_logging(str(Path(scenario_dir).parent))
 
     analysis_areas = gpd.read_file(f"{scenario_dir}/input_data/analysis_areas.gpkg")
     analysis_areas.index = analysis_areas['geom_id'].values
 
+    logger.info("=" * 60)
+    logger.info("STAGE: Representation  |  scenario: %s", scenario_dir)
+    logger.info("=" * 60)
     if not os.path.exists(f"{scenario_dir}/routing/user_classes_with_routeenvs.csv"):
         logger.info(f"defining experiences for {scenario_dir}")
         user_classes_w_routeenvs = apply_experience_defintions(f"{scenario_dir}/input_data", scenario_dir)
@@ -72,18 +78,18 @@ def run_scenario(scenario_dir,
         user_classes_w_routeenvs.index = user_classes_w_routeenvs.user_class_id.values
         user_classes_w_routeenvs.fillna("", inplace=True)
 
-
-    #if not os.path.exists(f"{scenario_dir}/impedances"):
-    logger.info("routing")
+    logger.info("=" * 60)
+    logger.info("STAGE: Routing  |  scenario: %s", scenario_dir)
+    logger.info("=" * 60)
     route_for_all_envs(f"{scenario_dir}",
                        analysis_areas,
                        user_classes_w_routeenvs,
                        track_volumes = track_volumes,
                        )
-    # else:
-    #     logger.info("routing already done. skipping.")
 
-    #structure ttms and create cost matrices
+    logger.info("=" * 60)
+    logger.info("STAGE: Evaluation  |  scenario: %s", scenario_dir)
+    logger.info("=" * 60)
     if not os.path.exists(f"{scenario_dir}/results/geometry_results.gpkg"):
         logger.info(f"evaluating {scenario_dir}")
         evaluate_scenario(scenario_dir,
@@ -94,6 +100,10 @@ def run_scenario(scenario_dir,
 
     else:
         logger.info("scenario has already been run")
+
+    logger.info("=" * 60)
+    logger.info("STAGE: Communication  |  scenario: %s", scenario_dir)
+    logger.info("=" * 60)
     if not os.path.exists(f"{scenario_dir}/results/geometry_results.html"):
         communication.make_radio_choropleth_map(
             scenario_dir=scenario_dir,
@@ -107,114 +117,212 @@ def run_scenario(scenario_dir,
 
 def initialize_existing_conditions(scenario_dir,
                                    states,
-                                   address = None,
-                                   lat=None,
-                                   lon=None,
-                                   buffer = 30000,  #m
-                                   taz_file = None,
-                                   traffic_datasource = None,
-                                   volume_datasource = None,
-                                   transcad_source = None,
+                                   center_geom=None,
+                                   address=None,
+                                   block_buffer=None,
+                                   bg_buffer=None,
+                                   tract_buffer=30000,
+                                   taz_file=None,
+                                   traffic_datasource=None,
+                                   volume_datasource=None,
+                                   transcad_source=None,
                                    ):
+    """Initialize existing conditions for a study area.
+
+    Args:
+        scenario_dir: Path to the scenario directory.
+        states: List of state abbreviations.
+        center_geom: Center of the analysis area. Accepts a GeoDataFrame,
+            Shapely geometry, or ``(lon, lat)`` tuple.  Mutually exclusive
+            with *address*.
+        address: Street address to geocode as the center of the analysis
+            area.  Mutually exclusive with *center_geom*.
+        block_buffer: Meters — innermost ring uses census blocks.
+        bg_buffer: Meters — middle ring uses census block groups.
+        tract_buffer: Meters — outermost ring uses census tracts (default 30 000).
+        taz_file: Path to a TAZ file. Mutually exclusive with
+            ``block_buffer``/``bg_buffer``.
+        traffic_datasource: Traffic speed source (e.g. ``'tomtom'``).
+        volume_datasource: Volume source (e.g. ``'tmas'``).
+        transcad_source: Optional TransCAD source.
+    """
+    from setup.populate_people_usa import prorate_userclass_stats
+
+    # --- validation --------------------------------------------------------
+    if center_geom is not None and address is not None:
+        raise ValueError(
+            "center_geom and address are mutually exclusive. "
+            "Provide one or the other, not both."
+        )
+    if taz_file is not None and (block_buffer is not None or bg_buffer is not None):
+        raise ValueError(
+            "taz_file and block_buffer/bg_buffer are mutually exclusive. "
+            "Provide one or the other, not both."
+        )
+
+    # Resolve address → center_geom so downstream code only uses center_geom
+    if address is not None:
+        center_geom = resolve_center_geom(address=address)
+
+    multi_resolution = (block_buffer is not None or bg_buffer is not None)
 
     os.makedirs(f"{scenario_dir}/input_data", exist_ok=True)
     input_dir = f'{scenario_dir}/input_data'
 
-    # get census tracts
+    configure_logging(str(Path(scenario_dir).parent))
+
+    logger.info("=" * 60)
+    logger.info("STAGE: Setup -- Census Geometries  |  scenario: %s", scenario_dir)
+    logger.info("=" * 60)
     os.makedirs(f"{input_dir}/census", exist_ok=True)
-    if not os.path.exists(f"{input_dir}/census/census_tracts.gpkg"):
-        if address is not None:
-            logger.info(f"fetching census tracts from {address} with buffer {buffer}m")
+
+    if multi_resolution:
+        # --- multi-resolution path ----------------------------------------
+        if not os.path.exists(f"{input_dir}/census/census_geometries.gpkg"):
+            logger.info("fetching multi-resolution census geometries")
+            analysis_areas = get_multi_resolution_geometries(
+                states=states,
+                center_geom=center_geom,
+                block_buffer=block_buffer,
+                bg_buffer=bg_buffer,
+                tract_buffer=tract_buffer,
+                save_to=f"{input_dir}/census/census_geometries.gpkg",
+            )
+        else:
+            analysis_areas = gpd.read_file(f"{input_dir}/census/census_geometries.gpkg")
+
+        # We still need tracts for ACS data / userclass creation.
+        # Extract the unique parent tract GEOIDs and fetch tract geometries
+        # so populate_people_usa can pull ACS data.
+        if not os.path.exists(f"{input_dir}/census/census_tracts.gpkg"):
+            logger.info("fetching parent tracts for ACS data")
             census_tracts = get_usa_tracts_from_location(
                 states=states,
-                buffer=buffer,
-                save_to = f"{input_dir}/census/census_tracts.gpkg",
-                address=address,
-            )
-        elif (lat is not None) and (lon is not None):
-            logger.info(f"fetching census tracts from ({lat}, {lon}) with buffer {buffer}m")
-            census_tracts = get_usa_tracts_from_location(
-                states=states,
-                buffer=buffer,
-                save_to = f"{input_dir}/census/census_tracts.gpkg",
-                lat=lat,
-                lon=lon,
-            )
-        elif taz_file is not None:
-            logger.info(f"fetching census tracts from polygon {taz_file}")
-            census_tracts = get_usa_tracts_from_polygon(
-                states=states,
-                polygon=taz_file,
+                center_geom=center_geom,
+                buffer=tract_buffer,
                 save_to=f"{input_dir}/census/census_tracts.gpkg",
             )
         else:
-            logger.info(f"fetching census tracts from {states} at the state level")
-            census_tracts = get_usa_tracts_from_state(
+            census_tracts = gpd.read_file(f"{input_dir}/census/census_tracts.gpkg")
+
+        # --- people (tract-level ACS → prorate to analysis areas) ---------
+        logger.info("=" * 60)
+        logger.info("STAGE: Setup -- Population & User Classes  |  scenario: %s", scenario_dir)
+        logger.info("=" * 60)
+        populate_people_usa(scenario_dir)
+
+        if not os.path.exists(f"{input_dir}/userclass_statistics.csv"):
+            logger.info("prorating userclass statistics to multi-resolution areas")
+            tract_stats = pd.read_csv(f"{input_dir}/census/tract_userclass_statistics.csv")
+            # Enrich tract_stats with parent_tract_GEOID for joining
+            tract_geom_id_to_GEOID = dict(
+                zip(census_tracts['geom_id'].astype(str), census_tracts['GEOID'])
+            )
+            tract_stats['parent_tract_GEOID'] = (
+                tract_stats['geom_id'].astype(str).map(tract_geom_id_to_GEOID)
+            )
+            prorated = prorate_userclass_stats(tract_stats, analysis_areas)
+            prorated.to_csv(f"{input_dir}/userclass_statistics.csv", index=False)
+
+        # --- destinations -------------------------------------------------
+        logger.info("=" * 60)
+        logger.info("STAGE: Setup -- Destinations  |  scenario: %s", scenario_dir)
+        logger.info("=" * 60)
+        if not os.path.exists(f"{input_dir}/analysis_areas.gpkg"):
+            logger.info("populating destinations for multi-resolution areas")
+            analysis_areas_with_dests = populate_all_dests_USA(
+                geographies=analysis_areas,
                 states=states,
-                save_to = f"{input_dir}/census/census_tracts.gpkg"
+                already_tracts=False,
+                save_to=f"{input_dir}/analysis_areas.gpkg",
             )
-    else:
-        # logger.info("loading tracts from disk")
-        census_tracts = gpd.read_file(f"{input_dir}/census/census_tracts.gpkg",index_col=0)
-
-    #get tract info
-    populate_people_usa(scenario_dir)
-
-    # get destinations
-    # For now, we're going to get destinations at the tract level BEFORE we interpolate to TAZs,
-    # because LODES jobs are at the tract level,
-    # so that we can use the same interpolation for destinations
-
-    if not os.path.exists(f"{input_dir}/census/census_tracts_with_dests.gpkg"):
-        logger.info("populating overture destinations")
-        populate_all_dests_USA(
-            geographies=census_tracts,
-            states=states,
-            already_tracts=True,
-            save_to=f"{input_dir}/census/census_tracts_with_dests.gpkg"
-        )
-    else:
-        logger.info("loading destinations from disk")
-
-    # determine analysis areas
-    # if we're using census tracts as the TAZs, copy them directly
-    # if we have TAZs already, MAUP interpolate to them
-    ### TODO: Base ratios off of tracts, but population numbers off of blocks
-
-    if taz_file is None: #assume we're using tracts
-        shutil.copyfile(f"{input_dir}/census/census_tracts_with_dests.gpkg", f"{input_dir}/analysis_areas.gpkg")
-        shutil.copyfile(f"{input_dir}/census/tract_userclass_statistics.csv", f"{input_dir}/userclass_statistics.csv")
-    else: #we're using some kind of TAZs
-        #check if we've already done this interpolation
-        if os.path.exists(f"{input_dir}/analysis_areas.gpkg") and os.path.exists(
-                f"{input_dir}/userclass_statistics.csv"):
-            logger.info("loading analysis areas from disk (assuming they're already TAZs)")
         else:
-            logger.info("interpolating tracts to TAZs")
-            interpolate_tracts_to_tazs(
-                tracts=f"{input_dir}/census/census_tracts_with_dests.gpkg",
-                tazs=taz_file,
-                userclass_statistics=f"{input_dir}/census/tract_userclass_statistics.csv",
-                taz_id_col="geom_id",
-                create_taz_id_col=True,
-                source_geom_id_col="geom_id",
-                save_userclass_csv_to=f"{input_dir}/userclass_statistics.csv",
-                save_analysis_areas_gpkg_to=f"{input_dir}/analysis_areas.gpkg",
-                interpolate_tract_cols=['overture_places','lodes_jobs']
-            )
+            logger.info("loading analysis areas from disk")
 
+    else:
+        # --- single-resolution path (tracts only, original behaviour) -----
+        if not os.path.exists(f"{input_dir}/census/census_tracts.gpkg"):
+            if center_geom is not None:
+                logger.info(f"fetching census tracts with buffer {tract_buffer}m")
+                census_tracts = get_usa_tracts_from_location(
+                    states=states,
+                    center_geom=center_geom,
+                    buffer=tract_buffer,
+                    save_to=f"{input_dir}/census/census_tracts.gpkg",
+                )
+            elif taz_file is not None:
+                logger.info(f"fetching census tracts from polygon {taz_file}")
+                census_tracts = get_usa_tracts_from_polygon(
+                    states=states,
+                    polygon=taz_file,
+                    save_to=f"{input_dir}/census/census_tracts.gpkg",
+                )
+            else:
+                logger.info(f"fetching census tracts from {states} at the state level")
+                census_tracts = get_usa_tracts_from_state(
+                    states=states,
+                    save_to=f"{input_dir}/census/census_tracts.gpkg"
+                )
+        else:
+            census_tracts = gpd.read_file(f"{input_dir}/census/census_tracts.gpkg", index_col=0)
+
+        # get tract info
+        logger.info("=" * 60)
+        logger.info("STAGE: Setup -- Population & User Classes  |  scenario: %s", scenario_dir)
+        logger.info("=" * 60)
+        populate_people_usa(scenario_dir)
+
+        # get destinations
+        logger.info("=" * 60)
+        logger.info("STAGE: Setup -- Destinations  |  scenario: %s", scenario_dir)
+        logger.info("=" * 60)
+        if not os.path.exists(f"{input_dir}/census/census_tracts_with_dests.gpkg"):
+            logger.info("populating overture destinations")
+            populate_all_dests_USA(
+                geographies=census_tracts,
+                states=states,
+                already_tracts=True,
+                save_to=f"{input_dir}/census/census_tracts_with_dests.gpkg"
+            )
+        else:
+            logger.info("loading destinations from disk")
+
+        # determine analysis areas
+        if taz_file is None:
+            shutil.copyfile(f"{input_dir}/census/census_tracts_with_dests.gpkg", f"{input_dir}/analysis_areas.gpkg")
+            shutil.copyfile(f"{input_dir}/census/tract_userclass_statistics.csv", f"{input_dir}/userclass_statistics.csv")
+        else:
+            if os.path.exists(f"{input_dir}/analysis_areas.gpkg") and os.path.exists(
+                    f"{input_dir}/userclass_statistics.csv"):
+                logger.info("loading analysis areas from disk (assuming they're already TAZs)")
+            else:
+                logger.info("interpolating tracts to TAZs")
+                interpolate_tracts_to_tazs(
+                    tracts=f"{input_dir}/census/census_tracts_with_dests.gpkg",
+                    tazs=taz_file,
+                    userclass_statistics=f"{input_dir}/census/tract_userclass_statistics.csv",
+                    taz_id_col="geom_id",
+                    create_taz_id_col=True,
+                    source_geom_id_col="geom_id",
+                    save_userclass_csv_to=f"{input_dir}/userclass_statistics.csv",
+                    save_analysis_areas_gpkg_to=f"{input_dir}/analysis_areas.gpkg",
+                    interpolate_tract_cols=['overture_places', 'lodes_jobs']
+                )
 
     calculate_population_per_sqkm(input_dir)
 
-    # get physical conditions
-    # includes its own has-this-already-been-run checks
+    logger.info("=" * 60)
+    logger.info("STAGE: Setup -- Physical Conditions  |  scenario: %s", scenario_dir)
+    logger.info("=" * 60)
     physical_conditions(scenario_dir,
-                        traffic_datasource = traffic_datasource,
-                        volume_datasource = volume_datasource,
-                        transcad_source = transcad_source)
+                        traffic_datasource=traffic_datasource,
+                        volume_datasource=volume_datasource,
+                        transcad_source=transcad_source)
 
-    #todo maybe move this into physical_conditions?
     if volume_datasource == "tmas":
+        logger.info("=" * 60)
+        logger.info("STAGE: Setup -- Traffic Volumes  |  scenario: %s", scenario_dir)
+        logger.info("=" * 60)
         os.makedirs(f"{input_dir}/traffic/", exist_ok=True)
         if not (os.path.exists(f"{input_dir}/tmas/tmas.VOL") and
                 os.path.exists(f"{input_dir}/tmas/tmas.STA")):
@@ -225,8 +333,6 @@ def initialize_existing_conditions(scenario_dir,
 
     else:
         raise ValueError(f"volume_datasource must be 'tmas', none others enabled")
-        #TODO: download from https://www.fhwa.dot.gov/policyinformation/tables/tmasdata/#y24  automatically
-        # TODO also figure out how to handle multi-state areas
 
 
 
@@ -251,59 +357,16 @@ def copy_ttms(from_scenario_dir,
 
 
 if __name__ == "__main__":
-    from project_scripts.denver_i270_scenarios import create_denver_cdot_scenario, create_denver_hcnw_scenario
-
-    study_name = "denver20"
-    # communication.compare_scenarios(f"testing/{study_name}", "existing_conditions", "cdot_scenario")
-    # compared_prepare_results(f"testing/{study_name}/cdot_scenario/")
-    #
-    # communication.compare_scenarios(f"testing/{study_name}", "existing_conditions", "hcnw_scenario")
-    # compared_prepare_results(f"testing/{study_name}/hcnw_scenario/")
-
-# def hold():
-    traffic_datasource = "tomtom"
-    volume_datasource = "tmas"
-    study_name = "denver20"
+    study_name = "ri_test"
+    traffic_datasource = None,
+    volume_datasource = "tmas",
     initialize_existing_conditions(
         scenario_dir=f"testing/{study_name}/existing_conditions/",
-        states=["CO"],
-        lat=39.805084,
-        lon=-104.940186,
-        buffer=20000,
+        states=["RI"],
+        address="252 Ives Street, Providence RI",
+        block_buffer=2000,
+        bg_buffer=5000,
+        tract_buffer=15000,
         traffic_datasource=traffic_datasource,
         volume_datasource=volume_datasource,
     )
-    run_scenario(f"testing/{study_name}/existing_conditions/",
-                 track_volumes={
-                                "checkpoint_node_ids": None,
-                                "checkpoint_edge_attr": "ref",
-                                "checkpoint_edge_values": ['I 270']}
-                 )
-    create_denver_cdot_scenario(
-        f"testing/{study_name}/existing_conditions/",
-        f"testing/{study_name}/cdot_scenario/",
-        )
-    run_scenario(f"testing/{study_name}/cdot_scenario/")
-
-    create_denver_hcnw_scenario(
-        f"testing/{study_name}/existing_conditions/",
-        f"testing/{study_name}/hcnw_scenario/",
-    )
-    run_scenario(f"testing/{study_name}/hcnw_scenario/")
-
-    communication.compare_scenarios(f"testing/{study_name}", "existing_conditions", "cdot_scenario")
-    communication.summarize_compared_results(f"testing/{study_name}/cdot_scenario/")
-
-    communication.compare_scenarios(f"testing/{study_name}", "existing_conditions", "hcnw_scenario")
-    communication.summarize_compared_results(f"testing/{study_name}/hcnw_scenario/")
-
-    # create_denver_hcnw_scenario("testing/denver/existing_conditions/",
-    #                             "testing/denver/hcnw_scenario/")
-    # run_scenario("testing/denver/hcnw_scenario/")
-    # communication.compare_scenarios("testing/denver",
-    #                                 "existing_conditions",
-    #                                 "cdot_scenario")
-    # communication.compare_scenarios("testing/denver",
-    #                                 "existing_conditions",
-    #                                 "hcnw_scenario")
-

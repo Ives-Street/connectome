@@ -401,7 +401,6 @@ def save_traffic_stats(G, scenario_dir, out_subdir="input_data/traffic"):
 
 
     edges['sc_delay_veh_min_per_mile'] = edges['scenario_delay_veh_min'] / (edges['length'] / 1609)
-    import pdb; pdb.set_trace()
 
     for metric in metrics:
         if metric in edges.columns:

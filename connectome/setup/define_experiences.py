@@ -160,7 +160,7 @@ def add_lts_tags(osm_filename: str, out_filename: str, max_lts: int = 3) -> None
     writer = osmium.SimpleWriter(out_filename)
     ltsadder = SimplestLTSAdder(writer, max_lts)
     ltsadder.apply_file(osm_filename)
-    print(f'With max_lts {max_lts}, added lts=1,2, or 3 to {ltsadder.n_modified_ways}')
+    logger.info(f'With max_lts {max_lts}, added lts=1,2, or 3 to {ltsadder.n_modified_ways}')
 
 def define_experiences(input_dir,
                        scenario_dir,

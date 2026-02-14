@@ -1,3 +1,5 @@
+import logging
+
 import pandas as pd
 import geopandas as gpd
 import os
@@ -8,6 +10,8 @@ from tqdm import tqdm
 import communication
 from traffic_utils.assignment import assign_relative_demand
 from constants import MODES, DECAY_RATE
+
+logger = logging.getLogger(__name__)
 
 #def evaluate_scenario(scenario_dir):
 # scenario_dir = "burlington_test/existing_conditions"
@@ -54,7 +58,7 @@ def load_gtms_for_userclasses(scenario_dir, user_classes):
         for mode in MODES:
             filename = f"{scenario_dir}/impedances/{userclass}/gtm_{mode}.csv"
             if os.path.exists(filename):
-                print("loading", filename)
+                logger.info("loading %s", filename)
                 gtm = load_gtm(filename)
 
                 # --- Normalize geom_id representation across all modes ---
@@ -113,7 +117,6 @@ def choose_modes_for_userclasses(scenario_dir,
     for userclass in userclass_gtms.keys():
         impedance_matrices_by_mode = userclass_gtms[userclass]
         if not impedance_matrices_by_mode:
-            import pdb; pdb.set_trace()
             raise ValueError("Input dictionary cannot be empty")
 
         # --- Harmonize indices/columns across all modes for this userclass ---
@@ -205,7 +208,7 @@ def evaluate_for_userclasses(
     values_per_dest_by_userclass = {}
     value_sum_total_by_OD_by_userclass = {}
     for userclass in lowest_traveltimes_by_userclass.keys():
-        print("summarizing results for", userclass)
+        logger.info("summarizing results for %s", userclass)
         lowest_traveltimes = lowest_traveltimes_by_userclass[userclass]
         values_per_dest = lowest_traveltimes.applymap(lambda x: value_per_destination_unit(x))
         values_per_dest_by_userclass[userclass] = values_per_dest
@@ -222,10 +225,7 @@ def evaluate_for_userclasses(
             pd.Index(value_sum_per_person.index).get_indexer(value_sum_per_person.columns), range(
                 len(value_sum_per_person.columns))] = 0
         value_sum_per_person_by_userclass[userclass] = value_sum_per_person
-        try:
-            pop_by_geom = population_by_geom_and_userclass[userclass]
-        except:
-            import pdb; pdb.set_trace()
+        pop_by_geom = population_by_geom_and_userclass[userclass]
         value_sum_per_person = value_sum_per_person_by_userclass[userclass]
         value_sum_total_by_OD = value_sum_per_person.mul(pop_by_geom, axis=0)
         value_sum_total_by_OD_by_userclass[userclass] = value_sum_total_by_OD
@@ -261,7 +261,7 @@ def get_userclass_results(scenario_dir,
 
     results_by_userclass = pd.DataFrame(index=list(userclass_gtms.keys()),
                                         columns=result_categories)
-    print("summarizing results by userclass")
+    logger.info("summarizing results by userclass")
     for userclass in tqdm(list(userclass_gtms.keys())):
         mode_selections = mode_selections_by_userclass[userclass]
         value_sum_total_by_OD = value_sum_total_by_OD_by_userclass[userclass]
@@ -333,10 +333,7 @@ def get_geometry_results_with_viz(
         gdf_uc = gpd.GeoDataFrame(df_uc, geometry=geometry_and_dests.geometry, crs=geometry_and_dests.crs)
 
         by_geom_and_userclass[uc] = gdf_uc
-        try:
-            per_uc_frames.append(gdf_uc[result_categories])  # numeric only for later aggregation
-        except:
-            import pdb; pdb.set_trace()
+        per_uc_frames.append(gdf_uc[result_categories])  # numeric only for later aggregation
 
     # --- aggregate across userclasses (vectorized) ---
     # Sum numeric columns across all userclasses, then compute derived % and per_capita
@@ -448,5 +445,6 @@ def evaluate_scenario(scenario_dir,
         assign_relative_demand(scenario_dir)
 
 
-    print("results by geometry sum", results_by_geometry.total_value.sum(), "results by userclass sum", results_by_userclass.total_value.sum())
+    logger.info("results by geometry sum %s, results by userclass sum %s",
+                results_by_geometry.total_value.sum(), results_by_userclass.total_value.sum())
 

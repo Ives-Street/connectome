@@ -876,7 +876,6 @@ def apply_tmas_obs_volumes_to_graph(
     # Join VOL to matches so we only process matched stations
     joined = vol.merge(matches_df, on=list(join_cols), how="inner")
     if joined.empty:
-        import pdb; pdb.set_trace()
         raise ValueError(
             "After joining VOL to station matches, no records remained. "
             f"Check that join columns align: {list(join_cols)}"
